@@ -1,0 +1,26 @@
+# Open-core boundary blocklist
+# Terms here must NEVER appear in the public framework repo.
+# One term per line. Case-insensitive. # for comments.
+# Refine if a term causes false positives (e.g. narrow "spar" to "the spar").
+
+# ── Company / product identifiers ──
+catalina
+vero beach
+deep recon
+deep re-con
+
+# ── Aircraft variants ──
+frigate
+kestrel
+condor
+
+# ── Domain-specific that signals the private pack ──
+amphibious
+amphibian
+part 25
+14 cfr 25
+special conditions
+gannet
+
+# Note: generic words like "hull", "naval", "certification" are intentionally
+# NOT blocked — they can legitimately appear in the generic example pack.

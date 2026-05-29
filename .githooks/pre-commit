@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Open-core boundary guard — blocks commits that leak private content.
+# Enable once per clone:  git config core.hooksPath .githooks
+exec "$(git rev-parse --show-toplevel)/scripts/check-boundary.sh"

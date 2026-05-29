@@ -32,11 +32,23 @@ examples/generic-pack/
   role-stage-matrix.md              # Example role × stage mappings
 app/
   discovery-board.jsx               # Persistent discovery lifecycle board
+scripts/
+  check-boundary.sh                 # Open-core boundary guard (blocks private leaks)
 docs/
-  architecture.html                 # System architecture diagram
-  role-matrix.html                  # Interactive role × stage explorer
+  BOUNDARY-PATTERN.md               # Reusable public/private enforcement pattern
 PACK-GUIDE.md                       # How to author your own content pack
+.boundary-blocklist                 # Terms that must never enter the public repo
 ```
+
+## Keeping public and private separate
+
+If you fork this and pair it with a private content pack, the repo ships with an automated boundary guard so private content never leaks into the public framework. Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Now every commit is scanned against `.boundary-blocklist`. A violation blocks the commit. See [docs/BOUNDARY-PATTERN.md](./docs/BOUNDARY-PATTERN.md) for the full pattern — it generalizes to any venture maintaining a public/private split.
 
 ## Core concepts
 

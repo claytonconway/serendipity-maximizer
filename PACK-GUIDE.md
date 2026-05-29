@@ -23,7 +23,7 @@ Define your roster of discovery agents. The framework selects 5 per session, so 
 
 **What makes a good agent:**
 - A *distinct vantage point* no other agent shares — not a department, a lens
-- Cross-domain reach built into the domain lens (the gannet-to-hull-design kind of leap)
+- Cross-domain reach built into the domain lens (the kind of leap that connects a biological mechanism to an engineering problem)
 - A clear primary discovery type so the calibration engine can track type distribution
 
 **Token tier** tells the calibration engine how expensive the agent is to run, which informs activation gating.
