@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.local
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.log
+# Runtime discovery data — never commit
+*-registry.md
+serendipity-registry.md
+focus-directives.md
+content-pack/
