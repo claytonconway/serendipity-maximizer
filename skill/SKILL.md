@@ -16,7 +16,7 @@ The framework reads two files from a content pack:
 - `role-stage-matrix.md` — which agents activate for each role × stage
 
 **Pack resolution order:**
-1. A pack path provided by the user this session ("use my Catalina pack at ...")
+1. A pack path provided by the user this session ("use my pack at ...")
 2. A `content-pack/` directory adjacent to this skill
 3. The bundled `examples/generic-pack/` (a fictional company — always present)
 
