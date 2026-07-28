@@ -34,8 +34,13 @@ if [ ! -f "$BLOCKLIST_FILE" ]; then
   exit 0
 fi
 
-# Load non-empty, non-comment lines
-mapfile -t TERMS < <(grep -v '^[[:space:]]*#' "$BLOCKLIST_FILE" | grep -v '^[[:space:]]*$' || true)
+# Load non-empty, non-comment lines.
+# Portable read loop instead of `mapfile`/`readarray` (bash 4+) so the guard
+# runs on macOS's default bash 3.2 — no `--no-verify` needed at commit time.
+TERMS=()
+while IFS= read -r term; do
+  TERMS+=("$term")
+done < <(grep -v '^[[:space:]]*#' "$BLOCKLIST_FILE" | grep -v '^[[:space:]]*$' || true)
 
 if [ "${#TERMS[@]}" -eq 0 ]; then
   echo "${YEL}Blocklist is empty — nothing to check.${NC}"
