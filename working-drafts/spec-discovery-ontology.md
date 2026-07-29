@@ -253,9 +253,12 @@ density(d, W) = Σ  ValueScore(x)     over discoveries x with:
 - **Why density needs the ontology:** you cannot value-weight "discoveries clustering in a domain"
   until discoveries are (a) anchored to SKOS domains and (b) scored on shared facets. That's why S1-0
   is upstream of the venture-candidate output.
-- **Anti-inflation guard:** because contribution = `ValueScore`, a flood of low-value ambient captures
-  adds little; `captureMode = ambient-emitter` items are further weighted down until they pass triage,
-  so cheap volume can't fake a cluster. (Ties to the S1-4 emitter spike and the "capture inflation" risk.)
+- **Anti-inflation guard (the gate):** contribution = `ValueScore`, and a **pre-triage** (`emitted`,
+  `captureMode = ambient-emitter`) discovery has **no `ValueScore` yet**, so it contributes **exactly 0**
+  to density until it is triaged — *"Emitted ≠ counted (yet)"*, **not** a fractional down-weight. `0` here
+  means "not scored yet" (data-availability), never exclusion: the item stays, is promotable, and is
+  tracked separately as unweighted emitter-backlog. So cheap volume can't fake a cluster. (Ties to the
+  S1-4 spike / S2-4; consistent with `spec-funnel-metric.md` §2.)
 
 ---
 
