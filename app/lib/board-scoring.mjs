@@ -32,6 +32,21 @@ export { convergentDiscoveryIds, detectConvergences, defaultState };
 
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
 
+// ─── S2-4 · THE GATE: "Emitted ≠ counted (yet)" ──────────────────────────────
+// A pre-`New` `emitted` capture (captureMode = ambient-emitter, no facets bound
+// yet) is PRE-TRIAGE: it has no ValueScore YET. `PRE_TRIAGE_STATUS` names that
+// single entry state. `isPreTriage` is the one predicate the gate turns on.
+//
+// The gate is deliberately implemented at the ValueScore path (not as a separate
+// down-weight): `scoreDiscovery` returns `null` for a pre-triage item, so it
+// simply FALLS OUT of any ValueScore-weighted sum (domain density) and is absent
+// from the funnel `captured` denominator. `null` = "not scored yet" (a
+// data-availability fact), NEVER exclusion — the item is fully alive, listed, and
+// promotable; its score materializes the moment it is triaged (`emitted → New`).
+export const PRE_TRIAGE_STATUS = "emitted";
+export const isPreTriage = (disc) =>
+  disc != null && disc.status === PRE_TRIAGE_STATUS;
+
 /**
  * Map a board discovery record onto the steering-loop facet profile.
  *
@@ -69,6 +84,11 @@ export function toValueProfile(disc) {
  * non-finite. Never throws — safe to call inline during render.
  */
 export function scoreDiscovery(disc, state = defaultState()) {
+  // THE GATE (S2-4): a pre-triage `emitted` capture has NO ValueScore yet.
+  // Returning null (not 0, not a fraction) means it contributes nothing to the
+  // density sum and never enters the captured denominator — "Emitted ≠ counted
+  // (yet)" — without exclusion. Score appears only after triage binds facets.
+  if (isPreTriage(disc)) return null;
   try {
     const s = valueScore(toValueProfile(disc), state);
     return Number.isFinite(s) ? s : null;
