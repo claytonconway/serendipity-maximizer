@@ -28,6 +28,40 @@ const AGENTS = [
   "13 · IP Infrastructure","14 · Org Systems & AI","Manual entry"
 ];
 
+// ─── S1-0 discovery ontology delta (additive, nullable) ──────────────────────
+// Enum vocabularies for the named minimal delta. Values are the exact tokens the
+// SHACL node shape checks with `sh:in` (spec-discovery-ontology.md §1 facet table
+// / §7.1). All new fields are optional — a saved discovery missing them stays valid.
+const GENERALITY    = ["point", "vertical", "platform", "universal"];          // F6
+const CAPTURE_MODE  = ["deliberate-scan", "ambient-emitter", "manual"];        // F7
+const DISTANCE_BAND = ["too-close", "serendipity-band", "too-far"];            // F3
+const RELATION_KIND = ["converges-with", "bridges", "refines", "supersedes"];  // §4 typed edges
+
+// JSON-LD @context bridging the board's stored JSON to the RDF/OWL model (spec §9).
+// Attach this to a discovery record and today's fields become valid RDF — no board
+// rewrite, no migration. §9 writes the project-namespace targets with a leading ":"
+// (the default namespace); here that default is carried by "@vocab", so the bare
+// term names below are equivalent to the spec's ":priority", ":lifecycleState", etc.
+export const DISCOVERY_CONTEXT = {
+  "@version": 1.1,
+  "@vocab": "https://serendipity-maximizer.example/ns#",
+  prov: "http://www.w3.org/ns/prov#",
+  skos: "http://www.w3.org/2004/02/skos/core#",
+  // existing board keys → RDF terms (spec §9)
+  type:           "@id",                    // :discoveryType (A/B/C/D scheme)
+  priorityScore:  "priority",               // :priority
+  status:         "lifecycleState",         // :lifecycleState
+  discoveredDate: "prov:generatedAtTime",
+  sourceAgent:    "prov:wasAttributedTo",
+  domains:        "primaryDomain",          // :primaryDomain (see @context note on domains[])
+  // named minimal delta → RDF terms (spec §1 facet table)
+  surprise:       "surprise",               // F4
+  generality:     "generality",             // F6
+  captureMode:    "captureMode",            // F7
+  distanceBand:   "distanceBand",           // F3 band
+  domainDistance: "domainDistance",         // F3 raw 0.0–1.0
+  relations:      "relation",               // §4 typed edges (typed upgrade of relatedIds)
+};
 
 const SAMPLE = [
   {
@@ -39,7 +73,11 @@ const SAMPLE = [
     refinementNotes:"University biomechanics lab nearby may have published gait datasets.",
     decision:"", decisionReason:"", nextAction:"Literature search: distributed legged locomotion control",
     nextActionDate:"2026-05-15", reactivationTrigger:"",
-    relatedIds:[], tags:["mobility","biomimicry","control"]
+    relatedIds:[], tags:["mobility","biomimicry","control"],
+    domains:[{name:"01 · Physics Bridge",primary:true},{name:"11 · Mission Systems",primary:false}],
+    surprise:4, generality:"vertical", captureMode:"deliberate-scan",
+    distanceBand:"serendipity-band", domainDistance:0.52,
+    relations:[{toId:"DISC-006", kind:"bridges"}]
   },
   {
     id:"DISC-002", title:"SRE blameless postmortems ↔ ISO safety incident reviews",
@@ -50,7 +88,11 @@ const SAMPLE = [
     refinementNotes:"One incident template can satisfy both engineering reliability and safety audit needs.",
     decision:"", decisionReason:"", nextAction:"Draft incident template compatible with SRE and ISO safety review",
     nextActionDate:"2026-05-12", reactivationTrigger:"",
-    relatedIds:[], tags:["SRE","safety","culture","process"]
+    relatedIds:[], tags:["SRE","safety","culture","process"],
+    domains:[{name:"14 · Org Systems & AI",primary:true},{name:"02 · Certification",primary:false}],
+    surprise:3, generality:"platform", captureMode:"deliberate-scan",
+    distanceBand:"serendipity-band", domainDistance:0.48,
+    relations:[{toId:"DISC-003", kind:"bridges"}]
   },
   {
     id:"DISC-003", title:"Safety certification precedent as competitive moat",
@@ -72,7 +114,10 @@ const SAMPLE = [
     refinementNotes:"Too early — needs the base platform validated first.",
     decision:"", decisionReason:"", nextAction:"", nextActionDate:"",
     reactivationTrigger:"Base platform reaches pilot deployment, OR a cold-storage operator reaches out.",
-    relatedIds:[], tags:["cold-storage","demand","vertical"]
+    relatedIds:[], tags:["cold-storage","demand","vertical"],
+    domains:[{name:"04 · Demand Scanner",primary:true}],
+    surprise:2, generality:"vertical", captureMode:"ambient-emitter",
+    distanceBand:"too-close", domainDistance:0.21, relations:[]
   },
   {
     id:"DISC-005", title:"Tooling platform choice locks data architecture for years",
@@ -248,10 +293,32 @@ function DetailView({ disc, allItems, onBack, onUpdate }) {
   const [editVal, setEditVal]   = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [analysis, setAnalysis]   = useState(null);
+  const [relTo, setRelTo]     = useState("");
+  const [relKind, setRelKind] = useState(RELATION_KIND[0]);
 
   function startEdit(f, v="") { setEditField(f); setEditVal(v); }
-  function saveEdit() { onUpdate(disc.id, {[editField]: editVal}); setEditField(null); }
+  function saveEdit() {
+    let v = editVal;
+    // domains[] is stored as [{name, primary}] — parse the comma string, first = primary
+    if (editField === "domains") {
+      v = editVal ? editVal.split(",").map((s,i)=>({name:s.trim(),primary:i===0})).filter(d=>d.name) : [];
+    }
+    onUpdate(disc.id, {[editField]: v});
+    setEditField(null);
+  }
   function cancelEdit() { setEditField(null); }
+
+  // Typed relations[] — additive; the untyped relatedIds[] is left untouched.
+  function setFacet(k, val) { onUpdate(disc.id, {[k]: val || null}); }
+  function addRelation() {
+    if (!relTo) return;
+    onUpdate(disc.id, {relations:[...(disc.relations||[]), {toId:relTo, kind:relKind}]});
+    setRelTo("");
+  }
+  function removeRelation(i) {
+    onUpdate(disc.id, {relations:(disc.relations||[]).filter((_,idx)=>idx!==i)});
+  }
+  const domainsStr = (disc.domains||[]).map(d=>d.name).join(", ");
 
   async function analyze() {
     setAnalyzing(true); setAnalysis(null);
@@ -360,6 +427,41 @@ Respond ONLY with valid JSON, no markdown:
         </DSection>
       )}
 
+      {/* ── S1-0 characterization (facets) ── */}
+      <DSection label="Characterization">
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"0.35rem"}}>
+          <span style={{...css.sectionLabel,fontSize:"0.55rem"}}>Domains · first = primary</span>
+          {editField!=="domains" && <button onClick={()=>startEdit("domains",domainsStr)} style={css.editBtn}>edit</button>}
+        </div>
+        {editField==="domains"
+          ? <EditBox val={editVal} onChange={setEditVal} onSave={saveEdit} onCancel={cancelEdit} onEnter={saveEdit} />
+          : (disc.domains||[]).length
+            ? <div style={{display:"flex",flexWrap:"wrap",gap:"0.3rem",marginBottom:"0.65rem"}}>
+                {disc.domains.map((d,i)=>(
+                  <span key={i} style={{...css.tag, ...(d.primary?{background:"rgba(167,139,250,0.16)",color:"#a78bfa"}:{})}}>
+                    {d.primary?"★ ":""}{d.name}
+                  </span>
+                ))}
+              </div>
+            : <p style={{...css.bodyText,color:"#4a4d5e",fontStyle:"italic",marginBottom:"0.65rem"}}>no domains set</p>
+        }
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.5rem 0.75rem"}}>
+          <FacetSelect label="Surprise (1–5)" value={disc.surprise} options={[1,2,3,4,5]}
+            onChange={v=>setFacet("surprise", v?parseInt(v):null)} />
+          <FacetSelect label="Generality" value={disc.generality} options={GENERALITY}
+            onChange={v=>setFacet("generality", v)} />
+          <FacetSelect label="Capture mode" value={disc.captureMode} options={CAPTURE_MODE}
+            onChange={v=>setFacet("captureMode", v)} />
+          <FacetSelect label="Distance band" value={disc.distanceBand} options={DISTANCE_BAND}
+            onChange={v=>setFacet("distanceBand", v)} />
+        </div>
+        {disc.domainDistance!=null && (
+          <div style={{marginTop:"0.45rem",fontSize:"0.6rem",fontFamily:"'DM Mono',monospace",color:"#6b7590"}}>
+            raw domainDistance: {disc.domainDistance}
+          </div>
+        )}
+      </DSection>
+
       {(disc.tags||[]).length > 0 && (
         <div style={{display:"flex",flexWrap:"wrap",gap:"0.3rem",marginBottom:"1rem"}}>
           {disc.tags.map(t => <span key={t} style={css.tag}>#{t}</span>)}
@@ -373,6 +475,34 @@ Respond ONLY with valid JSON, no markdown:
           ))}
         </DSection>
       )}
+
+      {/* ── S1-0 typed relations[] (additive over untyped relatedIds[]) ── */}
+      <DSection label="Typed relations">
+        {(disc.relations||[]).length > 0
+          ? disc.relations.map((r,i)=>{
+              const t = allItems.find(d=>d.id===r.toId);
+              return (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:"0.4rem",fontSize:"0.68rem",color:"#c8cad4",marginBottom:"0.3rem"}}>
+                  <span style={{...css.tag,color:"#4d9fff"}}>{r.kind}</span>
+                  <span style={{color:"#6b7590"}}>→</span>
+                  <span>{r.toId}{t?`: ${t.title}`:""}</span>
+                  <button onClick={()=>removeRelation(i)} style={{...css.editBtn,marginLeft:"auto"}}>✕</button>
+                </div>
+              );
+            })
+          : <p style={{...css.bodyText,color:"#4a4d5e",fontStyle:"italic",marginBottom:"0.4rem"}}>no typed relations</p>
+        }
+        <div style={{display:"flex",gap:"0.3rem",marginTop:"0.45rem",flexWrap:"wrap"}}>
+          <select value={relKind} onChange={e=>setRelKind(e.target.value)} style={{width:"auto",fontSize:"0.66rem"}}>
+            {RELATION_KIND.map(k=><option key={k} value={k}>{k}</option>)}
+          </select>
+          <select value={relTo} onChange={e=>setRelTo(e.target.value)} style={{flex:1,minWidth:"8rem",fontSize:"0.66rem"}}>
+            <option value="">select target…</option>
+            {allItems.filter(d=>d.id!==disc.id).map(d=><option key={d.id} value={d.id}>{d.id}: {d.title.slice(0,36)}</option>)}
+          </select>
+          <button onClick={addRelation} style={css.saveBtn}>+ link</button>
+        </div>
+      </DSection>
 
       {/* Move to */}
       <DSection label="Move to stage">
@@ -422,7 +552,8 @@ Respond ONLY with valid JSON, no markdown:
 // ─── Add Form ─────────────────────────────────────────────
 function AddForm({ items, onAdd, onBack }) {
   const [f, setF] = useState({ title:"", type:"B", sourceAgent:"Manual entry", priorityScore:"",
-    owner:"", summary:"", nextAction:"", tags:"", teamVisible:true });
+    owner:"", summary:"", nextAction:"", tags:"", teamVisible:true,
+    domains:"", surprise:"", generality:"", captureMode:"manual", distanceBand:"" });
 
   function submit() {
     if (!f.title.trim()) return;
@@ -435,7 +566,17 @@ function AddForm({ items, onAdd, onBack }) {
       status:"new", owner:f.owner, teamVisible:f.teamVisible, convergence:false,
       summary:f.summary, refinementNotes:"", decision:"", decisionReason:"",
       nextAction:f.nextAction, nextActionDate:"", reactivationTrigger:"",
-      relatedIds:[], tags:f.tags?f.tags.split(",").map(t=>t.trim()).filter(Boolean):[]
+      relatedIds:[], tags:f.tags?f.tags.split(",").map(t=>t.trim()).filter(Boolean):[],
+      // ── S1-0 ontology delta (additive, nullable) ──
+      domains: f.domains
+        ? f.domains.split(",").map((s,i)=>({name:s.trim(),primary:i===0})).filter(d=>d.name)
+        : [],
+      surprise: f.surprise ? parseInt(f.surprise) : null,
+      generality: f.generality || null,
+      captureMode: f.captureMode || null,
+      distanceBand: f.distanceBand || null,
+      domainDistance: null,   // embedding-computed downstream (S1-2)
+      relations: []
     });
   }
 
@@ -466,6 +607,39 @@ function AddForm({ items, onAdd, onBack }) {
       <Field label="Summary"><textarea value={f.summary} onChange={e=>set("summary",e.target.value)} rows={4} placeholder="What was discovered and why it matters" style={{resize:"vertical"}} /></Field>
       <Field label="Next action"><input value={f.nextAction} onChange={e=>set("nextAction",e.target.value)} placeholder="Specific next step" /></Field>
       <Field label="Tags (comma-separated)"><input value={f.tags} onChange={e=>set("tags",e.target.value)} placeholder="hull, biomimicry, IP" /></Field>
+
+      {/* ── S1-0 characterization (all optional) ── */}
+      <Field label="Domains (comma-separated · first = primary)">
+        <input value={f.domains} onChange={e=>set("domains",e.target.value)} placeholder="01 · Physics Bridge, 11 · Mission Systems" />
+      </Field>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.65rem"}}>
+        <Field label="Surprise (1–5)">
+          <select value={f.surprise} onChange={e=>set("surprise",e.target.value)}>
+            <option value="">—</option>
+            {[1,2,3,4,5].map(n=><option key={n} value={n}>{n}</option>)}
+          </select>
+        </Field>
+        <Field label="Generality">
+          <select value={f.generality} onChange={e=>set("generality",e.target.value)}>
+            <option value="">—</option>
+            {GENERALITY.map(g=><option key={g} value={g}>{g}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0.65rem"}}>
+        <Field label="Capture mode">
+          <select value={f.captureMode} onChange={e=>set("captureMode",e.target.value)}>
+            {CAPTURE_MODE.map(c=><option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Distance band">
+          <select value={f.distanceBand} onChange={e=>set("distanceBand",e.target.value)}>
+            <option value="">—</option>
+            {DISTANCE_BAND.map(b=><option key={b} value={b}>{b}</option>)}
+          </select>
+        </Field>
+      </div>
+
       <div style={{display:"flex",gap:"0.5rem",marginTop:"0.75rem"}}>
         <button onClick={submit} style={css.submitBtn}>Add discovery</button>
         <button onClick={onBack} style={css.cancelBtn}>Cancel</button>
@@ -508,6 +682,18 @@ function Kv({ k, v }) {
     <div style={{display:"flex",gap:"0.35rem",alignItems:"baseline"}}>
       <span style={{fontSize:"0.58rem",fontFamily:"'DM Mono',monospace",color:"#6b7590",textTransform:"uppercase",letterSpacing:"0.06em"}}>{k}</span>
       <span style={{color:"#c8cad4"}}>{v}</span>
+    </div>
+  );
+}
+
+function FacetSelect({ label, value, options, onChange, placeholder }) {
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:"0.2rem"}}>
+      <span style={{fontSize:"0.55rem",fontFamily:"'DM Mono',monospace",color:"#6b7590",textTransform:"uppercase",letterSpacing:"0.06em"}}>{label}</span>
+      <select value={value ?? ""} onChange={e=>onChange(e.target.value)} style={{fontSize:"0.68rem"}}>
+        <option value="">{placeholder||"—"}</option>
+        {options.map(o=><option key={o} value={o}>{o}</option>)}
+      </select>
     </div>
   );
 }
