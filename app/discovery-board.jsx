@@ -1,4 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+// S2-6: geometric convergence + ValueScore ranking, via the nullable-safe adapter
+// that bridges the board's stored shape onto the pure-ESM engines. Additive only.
+import {
+  convergentDiscoveryIds,
+  valueScoreMap,
+  defaultState,
+} from "./lib/board-scoring.mjs";
 
 const STORAGE_KEY = "serendipity-discoveries-v1";
 
@@ -176,10 +183,29 @@ export default function DiscoveryBoard() {
 
   function addItem(disc) { persist([disc, ...items]); setShowAdd(false); }
 
+  // ── S2-6 geometric layer (derived, additive) ──────────────────────────────
+  // convergentIds: the set of discovery ids participating in ANY fired geometric
+  // :Convergence — the source of truth for the CONV badge (the stored
+  // `convergence` boolean stays readable for back-compat but no longer drives UI).
+  // valueScores: id→ValueScore under ratified weights; nullable-safe (missing
+  // S2-1 facets → finite score, never NaN). Memoized so they only recompute when
+  // the corpus changes.
+  const ratifiedState = useMemo(() => defaultState(), []);
+  const convergentIds = useMemo(() => convergentDiscoveryIds(items), [items]);
+  const valueScores   = useMemo(() => valueScoreMap(items, ratifiedState), [items, ratifiedState]);
+  const vsOf = (id) => { const v = valueScores.get(String(id)); return typeof v === "number" ? v : null; };
+
   const visible = items.filter(d =>
     (statusFilter === "all" || d.status === statusFilter) &&
     (typeFilter  === "all" || d.type  === typeFilter)
-  ).sort((a,b) => b.priorityScore - a.priorityScore);
+  ).sort((a,b) => {
+    // Rank by geometric ValueScore (desc); fall back to priorityScore when a
+    // score is unavailable, and use priorityScore as a stable tiebreaker.
+    const va = vsOf(a.id), vb = vsOf(b.id);
+    const na = va == null ? -Infinity : va, nb = vb == null ? -Infinity : vb;
+    if (nb !== na) return nb - na;
+    return (b.priorityScore||0) - (a.priorityScore||0);
+  });
 
   const counts = STATUS_ORDER.reduce((acc,s) => ({ ...acc, [s]: items.filter(d=>d.status===s).length }), {});
   const expandedItem = expanded ? items.find(d => d.id === expanded.id) : null;
@@ -248,7 +274,7 @@ export default function DiscoveryBoard() {
 
       {/* List */}
       <div style={{display:"flex",flexDirection:"column",gap:"0.5rem"}}>
-        {visible.map(d => <DiscCard key={d.id} disc={d} onClick={() => setExpanded(d)} />)}
+        {visible.map(d => <DiscCard key={d.id} disc={d} converged={convergentIds.has(String(d.id))} valueScore={vsOf(d.id)} onClick={() => setExpanded(d)} />)}
         {visible.length === 0 && (
           <div style={css.empty}>no discoveries match this filter</div>
         )}
@@ -258,7 +284,7 @@ export default function DiscoveryBoard() {
 }
 
 // ─── Discovery Card ────────────────────────────────────────
-function DiscCard({ disc, onClick }) {
+function DiscCard({ disc, onClick, converged, valueScore }) {
   const sm = STATUS_META[disc.status];
   const tm = TYPE_META[disc.type];
   return (
@@ -267,7 +293,10 @@ function DiscCard({ disc, onClick }) {
       <div style={{paddingLeft:"0.875rem"}}>
         <div style={{display:"flex",alignItems:"center",gap:"0.4rem",marginBottom:"0.3rem"}}>
           <span style={{...css.typeBadge,background:tm.bg,color:tm.text}}>{disc.type}·{tm.label.split(" ")[0]}</span>
-          {disc.convergence && <span style={css.convBadge}>⬡ CONV</span>}
+          {converged && <span style={css.convBadge}>⬡ CONV</span>}
+          {typeof valueScore === "number" && (
+            <span style={css.vsBadge} title="ValueScore (ratified weights)">VS {valueScore.toFixed(2)}</span>
+          )}
           <span style={{marginLeft:"auto",fontSize:"0.75rem",fontWeight:"700",color:sm.color}}>{disc.priorityScore}</span>
         </div>
         <div style={css.cardTitle}>{disc.title}</div>
@@ -289,6 +318,15 @@ function DiscCard({ disc, onClick }) {
 function DetailView({ disc, allItems, onBack, onUpdate }) {
   const sm = STATUS_META[disc.status];
   const tm = TYPE_META[disc.type];
+  // S2-6: geometric convergence over the full corpus + nullable-safe ValueScore.
+  const converged = useMemo(
+    () => convergentDiscoveryIds(allItems).has(String(disc.id)),
+    [allItems, disc.id]
+  );
+  const valueScore = useMemo(() => {
+    const v = valueScoreMap([disc]).get(String(disc.id));
+    return typeof v === "number" ? v : null;
+  }, [disc]);
   const [editField, setEditField] = useState(null);
   const [editVal, setEditVal]   = useState("");
   const [analyzing, setAnalyzing] = useState(false);
@@ -371,7 +409,8 @@ Respond ONLY with valid JSON, no markdown:
       <div style={{display:"flex",gap:"0.4rem",alignItems:"center",marginBottom:"0.65rem",flexWrap:"wrap"}}>
         <span style={{...css.typeBadge,background:tm.bg,color:tm.text,fontSize:"0.65rem",padding:"0.2rem 0.55rem"}}>Type {disc.type} · {tm.label}</span>
         <span style={{fontSize:"0.65rem",fontFamily:"'DM Mono',monospace",color:"#ffd166",letterSpacing:"0.04em"}}>Priority {disc.priorityScore}</span>
-        {disc.convergence && <span style={css.convBadge}>⬡ Convergence event</span>}
+        {valueScore != null && <span style={css.vsBadge} title="ValueScore (ratified weights)">VS {valueScore.toFixed(2)}</span>}
+        {converged && <span style={css.convBadge}>⬡ Convergence event</span>}
       </div>
 
       <h2 style={{fontSize:"0.95rem",fontWeight:"700",lineHeight:"1.35",marginBottom:"0.5rem"}}>{disc.title}</h2>
@@ -733,6 +772,7 @@ const css = {
   cardAccent: { position:"absolute", top:0, left:0, bottom:0, width:"3px", opacity:0.75 },
   typeBadge: { fontSize:"0.58rem", padding:"0.14rem 0.38rem", borderRadius:"4px", fontFamily:"'DM Mono',monospace", letterSpacing:"0.04em", flexShrink:0 },
   convBadge: { fontSize:"0.55rem", padding:"0.12rem 0.35rem", borderRadius:"4px", background:"rgba(255,209,102,0.14)", color:"#ffd166", fontFamily:"'DM Mono',monospace" },
+  vsBadge: { fontSize:"0.55rem", padding:"0.12rem 0.35rem", borderRadius:"4px", background:"rgba(0,212,170,0.12)", color:"#00d4aa", fontFamily:"'DM Mono',monospace", letterSpacing:"0.03em" },
   cardTitle: { fontSize:"0.78rem", fontWeight:"600", lineHeight:"1.35", marginBottom:"0.3rem" },
   cardMeta: { display:"flex", alignItems:"center", gap:"0.4rem", flexWrap:"wrap", fontSize:"0.6rem", fontFamily:"'DM Mono',monospace" },
   nextAction: { marginTop:"0.4rem", fontSize:"0.62rem", color:"#6b7590", borderTop:"1px solid rgba(255,255,255,0.04)", paddingTop:"0.35rem" },
