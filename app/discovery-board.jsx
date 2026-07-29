@@ -6,10 +6,19 @@ import {
   valueScoreMap,
   defaultState,
 } from "./lib/board-scoring.mjs";
+// S2-4: pre-`New` ambient emitter — the "Emitted ≠ counted (yet)" gate lives in
+// the scoring/metrics layer; here we surface the emitter-backlog volume and the
+// facet-binding triage promotion. Additive; density/funnel gating is structural.
+import { funnelMetrics, triagePromotionPatch } from "./lib/board-metrics.mjs";
 
 const STORAGE_KEY = "serendipity-discoveries-v1";
 
 const STATUS_META = {
+  // S2-4: `emitted` is the pre-`New` ENTRY state. Ambient captures land here with
+  // no facets bound; they contribute 0 to density + the captured denominator (the
+  // gate) until triaged. Its ONE onward transition is triage → New. Existing
+  // states and their transitions below are UNCHANGED (additive).
+  emitted:     { label: "Emitted",     color: "#7c8598", next: ["new"] },
   new:         { label: "New",         color: "#a78bfa", next: ["reviewing", "team_triage", "banked"] },
   reviewing:   { label: "Reviewing",   color: "#4d9fff", next: ["team_triage", "banked", "new"] },
   team_triage: { label: "Team Triage", color: "#f5a623", next: ["decision", "active", "reviewing", "banked"] },
@@ -18,7 +27,8 @@ const STATUS_META = {
   banked:      { label: "Banked",      color: "#6b7590", next: ["reviewing", "team_triage"] },
 };
 
-const STATUS_ORDER = ["new","reviewing","team_triage","decision","active","banked"];
+// `emitted` leads the order so its backlog tab/count sits at the funnel mouth.
+const STATUS_ORDER = ["emitted","new","reviewing","team_triage","decision","active","banked"];
 
 const TYPE_META = {
   A: { label: "Anomaly",        bg: "rgba(220,38,38,0.18)",   text: "#fca5a5" },
@@ -26,6 +36,11 @@ const TYPE_META = {
   C: { label: "Constraint Flip",bg: "rgba(34,197,94,0.18)",   text: "#86efac" },
   D: { label: "Scale Shift",    bg: "rgba(234,179,8,0.18)",   text: "#fde68a" },
 };
+// Fallback for un-typed discoveries — an ambient `emitted` capture has no F1 Type
+// until triage binds one. Keeps the card/detail renderers from dereferencing an
+// undefined TYPE_META[type]. Neutral, clearly "untyped".
+const UNTYPED_META = { label: "Untyped", bg: "rgba(124,133,152,0.16)", text: "#8b93a6" };
+const typeMetaOf = (type) => TYPE_META[type] || UNTYPED_META;
 
 const AGENTS = [
   "01 · Physics Bridge","02 · Certification","03 · Materials",
@@ -157,6 +172,7 @@ export default function DiscoveryBoard() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [expanded, setExpanded] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [ambientText, setAmbientText] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -183,6 +199,28 @@ export default function DiscoveryBoard() {
 
   function addItem(disc) { persist([disc, ...items]); setShowAdd(false); }
 
+  // S2-4 ambient capture: the cheap/hot quick-add. Creates an `emitted` item with
+  // captureMode = ambient-emitter and NO required facets (just the note/title).
+  // Distinct from the full AddForm — pre-triage, so it lands OUTSIDE density + the
+  // captured funnel until promoted (the gate). Facets get bound later, at triage.
+  function emitAmbient() {
+    const title = ambientText.trim();
+    if (!title) return;
+    const n = items.length + 1;
+    persist([{
+      id:`DISC-${String(n).padStart(3,"0")}`,
+      title, status:"emitted", captureMode:"ambient-emitter",
+      sourceAgent:"Ambient emitter",
+      discoveredDate:new Date().toISOString().split("T")[0],
+      discoveredBy:"Ambient", owner:"", teamVisible:true, convergence:false,
+      // No facets bound yet (type/surprise/generality/domains/…): all nullable.
+      summary:"", refinementNotes:"", decision:"", decisionReason:"",
+      nextAction:"", nextActionDate:"", reactivationTrigger:"",
+      relatedIds:[], tags:[], domains:[], relations:[],
+    }, ...items]);
+    setAmbientText("");
+  }
+
   // ── S2-6 geometric layer (derived, additive) ──────────────────────────────
   // convergentIds: the set of discovery ids participating in ANY fired geometric
   // :Convergence — the source of truth for the CONV badge (the stored
@@ -193,6 +231,9 @@ export default function DiscoveryBoard() {
   const ratifiedState = useMemo(() => defaultState(), []);
   const convergentIds = useMemo(() => convergentDiscoveryIds(items), [items]);
   const valueScores   = useMemo(() => valueScoreMap(items, ratifiedState), [items, ratifiedState]);
+  // S2-4 funnel/density metrics (gate-applied): emitter-backlog volume is drawn
+  // ONLY from pre-triage items and never feeds the value-weighted density.
+  const metrics       = useMemo(() => funnelMetrics(items, { state: ratifiedState }), [items, ratifiedState]);
   const vsOf = (id) => { const v = valueScores.get(String(id)); return typeof v === "number" ? v : null; };
 
   const visible = items.filter(d =>
@@ -232,12 +273,22 @@ export default function DiscoveryBoard() {
         <button style={css.addBtn} onClick={() => setShowAdd(true)}>+ Add</button>
       </div>
 
+      {/* S2-4 ambient capture — cheap/hot quick-add. Lands in `emitted` (pre-triage,
+          captureMode = ambient-emitter). Note only; facets bound later at triage. */}
+      <div style={{display:"flex",gap:"0.4rem",marginBottom:"1rem"}}>
+        <input value={ambientText} onChange={e=>setAmbientText(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&emitAmbient()}
+          placeholder="⚡ Ambient capture — jot a note, triage later" style={{flex:1}} />
+        <button onClick={emitAmbient} style={css.emitBtn} title="Emit an ambient capture (pre-triage; not yet counted)">Emit</button>
+      </div>
+
       {/* Stats strip */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:"0.4rem",marginBottom:"1.125rem"}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"0.4rem",marginBottom:"1.125rem"}}>
         {[
-          { label:"Total",    val:items.length,       color:"#e8eaf0" },
-          { label:"Active",   val:counts.active||0,   color:"#4ade80" },
-          { label:"Banked",   val:counts.banked||0,   color:"#6b7590" },
+          { label:"Total",    val:items.length,             color:"#e8eaf0" },
+          { label:"Active",   val:counts.active||0,         color:"#4ade80" },
+          { label:"Banked",   val:counts.banked||0,         color:"#6b7590" },
+          { label:"Emitter",  val:metrics.emitterBacklog,   color:"#7c8598" },
         ].map(s => (
           <div key={s.label} style={css.statCard}>
             <div style={{fontSize:"1.25rem",fontWeight:"700",color:s.color,lineHeight:1}}>{s.val}</div>
@@ -285,14 +336,14 @@ export default function DiscoveryBoard() {
 
 // ─── Discovery Card ────────────────────────────────────────
 function DiscCard({ disc, onClick, converged, valueScore }) {
-  const sm = STATUS_META[disc.status];
-  const tm = TYPE_META[disc.type];
+  const sm = STATUS_META[disc.status] || STATUS_META.emitted;
+  const tm = typeMetaOf(disc.type);
   return (
     <div style={css.card} onClick={onClick}>
       <div style={{...css.cardAccent, background:sm.color}} />
       <div style={{paddingLeft:"0.875rem"}}>
         <div style={{display:"flex",alignItems:"center",gap:"0.4rem",marginBottom:"0.3rem"}}>
-          <span style={{...css.typeBadge,background:tm.bg,color:tm.text}}>{disc.type}·{tm.label.split(" ")[0]}</span>
+          <span style={{...css.typeBadge,background:tm.bg,color:tm.text}}>{disc.type?`${disc.type}·${tm.label.split(" ")[0]}`:tm.label}</span>
           {converged && <span style={css.convBadge}>⬡ CONV</span>}
           {typeof valueScore === "number" && (
             <span style={css.vsBadge} title="ValueScore (ratified weights)">VS {valueScore.toFixed(2)}</span>
@@ -316,8 +367,8 @@ function DiscCard({ disc, onClick, converged, valueScore }) {
 
 // ─── Detail View ────────────────────────────────────────────
 function DetailView({ disc, allItems, onBack, onUpdate }) {
-  const sm = STATUS_META[disc.status];
-  const tm = TYPE_META[disc.type];
+  const sm = STATUS_META[disc.status] || STATUS_META.emitted;
+  const tm = typeMetaOf(disc.type);
   // S2-6: geometric convergence over the full corpus + nullable-safe ValueScore.
   const converged = useMemo(
     () => convergentDiscoveryIds(allItems).has(String(disc.id)),
@@ -371,7 +422,7 @@ function DetailView({ disc, allItems, onBack, onUpdate }) {
 
 DISCOVERY:
 Title: ${disc.title}
-Type: ${disc.type} (${TYPE_META[disc.type].label})
+Type: ${disc.type||"—"} (${typeMetaOf(disc.type).label})
 Agent: ${disc.sourceAgent}
 Priority: ${disc.priorityScore}
 Summary: ${disc.summary}
@@ -407,7 +458,7 @@ Respond ONLY with valid JSON, no markdown:
 
       {/* Badges */}
       <div style={{display:"flex",gap:"0.4rem",alignItems:"center",marginBottom:"0.65rem",flexWrap:"wrap"}}>
-        <span style={{...css.typeBadge,background:tm.bg,color:tm.text,fontSize:"0.65rem",padding:"0.2rem 0.55rem"}}>Type {disc.type} · {tm.label}</span>
+        <span style={{...css.typeBadge,background:tm.bg,color:tm.text,fontSize:"0.65rem",padding:"0.2rem 0.55rem"}}>{disc.type?`Type ${disc.type} · ${tm.label}`:tm.label}</span>
         <span style={{fontSize:"0.65rem",fontFamily:"'DM Mono',monospace",color:"#ffd166",letterSpacing:"0.04em"}}>Priority {disc.priorityScore}</span>
         {valueScore != null && <span style={css.vsBadge} title="ValueScore (ratified weights)">VS {valueScore.toFixed(2)}</span>}
         {converged && <span style={css.convBadge}>⬡ Convergence event</span>}
@@ -544,14 +595,27 @@ Respond ONLY with valid JSON, no markdown:
       </DSection>
 
       {/* Move to */}
-      <DSection label="Move to stage">
+      <DSection label={disc.status==="emitted" ? "Triage" : "Move to stage"}>
+        {disc.status==="emitted" && (
+          <p style={{...css.bodyText,color:"#7c8598",fontStyle:"italic",marginBottom:"0.5rem",fontSize:"0.68rem"}}>
+            Pre-triage ambient capture — contributes 0 to density &amp; the captured funnel until triaged.
+            Set the facets above, then promote to New to bind the profile and start it counting.
+          </p>
+        )}
         <div style={{display:"flex",gap:"0.4rem",flexWrap:"wrap"}}>
           {(STATUS_META[disc.status]?.next||[]).map(s => {
             const m = STATUS_META[s];
+            // S2-4 triage promotion: `emitted → New` binds the facet profile AT
+            // TRIAGE time (captureMode-aware) and stamps triagedDate — the moment
+            // the item gains a ValueScore. Other transitions are unchanged.
+            const onMove = () =>
+              (disc.status==="emitted" && s==="new")
+                ? onUpdate(disc.id, triagePromotionPatch(disc, {}, new Date().toISOString().split("T")[0]))
+                : onUpdate(disc.id, {status:s});
             return (
-              <button key={s} onClick={() => onUpdate(disc.id, {status:s})}
+              <button key={s} onClick={onMove}
                 style={{...css.moveBtn, background:`${m.color}14`, borderColor:`${m.color}40`, color:m.color}}>
-                → {m.label}
+                → {disc.status==="emitted" && s==="new" ? "Triage → New" : m.label}
               </button>
             );
           })}
@@ -762,6 +826,7 @@ const css = {
   eyebrow: { fontSize:"0.6rem", fontFamily:"'DM Mono',monospace", color:"#6b7590", letterSpacing:"0.12em", textTransform:"uppercase", marginBottom:"0.15rem" },
   h1: { fontSize:"1.05rem", fontWeight:"700", margin:0 },
   addBtn: { background:"rgba(167,139,250,0.14)", border:"1px solid rgba(167,139,250,0.35)", borderRadius:"8px", color:"#a78bfa", padding:"0.4rem 0.8rem", fontSize:"0.7rem", fontFamily:"'DM Mono',monospace", letterSpacing:"0.05em", cursor:"pointer", flexShrink:0 },
+  emitBtn: { background:"rgba(124,133,152,0.16)", border:"1px solid rgba(124,133,152,0.4)", borderRadius:"8px", color:"#a7afc0", padding:"0.4rem 0.9rem", fontSize:"0.7rem", fontFamily:"'DM Mono',monospace", letterSpacing:"0.05em", cursor:"pointer", flexShrink:0 },
   statCard: { background:"#111620", border:"1px solid rgba(255,255,255,0.07)", borderRadius:"9px", padding:"0.6rem 0.5rem", textAlign:"center" },
   statLabel: { fontSize:"0.58rem", fontFamily:"'DM Mono',monospace", color:"#6b7590", letterSpacing:"0.08em", textTransform:"uppercase", marginTop:"0.15rem" },
   tabRow: { display:"flex", gap:"0.3rem", overflowX:"auto", marginBottom:"0.65rem", paddingBottom:"0.2rem" },

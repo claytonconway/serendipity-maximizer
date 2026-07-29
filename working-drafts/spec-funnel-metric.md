@@ -56,8 +56,23 @@ density(d, W) = Σ  ValueScore(x)     over discoveries x with:
 
 - `d` anchored via S1-2's domain **centroids** (`d_dom`); `ValueScore(x)` from S1-1 (ratified weights).
 - **Soft floor:** `ValueScore < 0.35` items are Bank-eligible + down-weighted but **still contribute**
-  their small `ValueScore`. `captureMode = ambient-emitter` items are further down-weighted until
-  triaged (anti-inflation; ties to the S1-4 emitter spike).
+  their small `ValueScore`. The soft floor never excludes — it is the *only* mechanism acting on a
+  scored discovery. The one thing that is *not* soft-floored is a discovery with **no score yet** — see
+  the gate.
+- **THE GATE — "Emitted ≠ counted (yet)" (S2-4, replaces the earlier "down-weight ambient until
+  triaged" wording).** A `captureMode = ambient-emitter` capture enters at the pre-`New` `emitted`
+  state carrying **no bound facets, and therefore no `ValueScore` yet**. Until it is triaged
+  (`emitted → New`, which binds its facet profile), it contributes **exactly 0** to (a) this density
+  sum and (b) the funnel `captured` denominator. This is **not a fractional down-weight** — it falls
+  straight out of the `ValueScore`-weighted sum because a pre-triage item has *no score to add*. The
+  `0` means **"not scored yet" (data-availability), never exclusion**: the item is fully alive, listed,
+  and promotable, and the instant it is triaged it contributes its `ValueScore` like any other
+  discovery. Pre-triage volume is tracked separately as an **emitter-backlog** count (unweighted,
+  clearly labeled) that must **not** feed density. Anti-inflation then holds *structurally*: a flood of
+  cheap ambient captures adds nothing to a cluster because unscored captures contribute zero — cheap
+  volume cannot fake a venture signal. (Ties to the S1-4 emitter spike; consistent with the S1-0 rev-3
+  no-exclusion model — 0-because-unscored is a data-availability fact, distinct from the soft floor's
+  small-but-nonzero contribution for *scored* low-value items.)
 - **Why weighted, not counted:** a cluster of four *strong* discoveries should outweigh twelve weak
   ones. Counting rewards volume; value-weighting rewards concentrated *quality* — which is what a real
   venture signal is.
