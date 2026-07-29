@@ -15,8 +15,13 @@ import { funnelMetrics, triagePromotionPatch } from "./lib/board-metrics.mjs";
 // `emitted` note; `confirmTriage` is the ONE fast human-confirm that binds the
 // facets and promotes emitted→New (delegating to triagePromotionPatch above).
 import { autoFacets, confirmTriage } from "./lib/triage.mjs";
+// S3-5: nullable-safe persistence. Prefer host `window.storage`, fall back to
+// localStorage (old saved discoveries keep loading), then in-memory. Resolved
+// once at load; the board's async get/set contract is unchanged.
+import { createStorage } from "./lib/storage-adapter.mjs";
 
 const STORAGE_KEY = "serendipity-discoveries-v1";
+const storage = createStorage();
 
 const STATUS_META = {
   // S2-4: `emitted` is the pre-`New` ENTRY state. Ambient captures land here with
@@ -182,9 +187,9 @@ export default function DiscoveryBoard() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get(STORAGE_KEY);
+        const r = await storage.get(STORAGE_KEY);
         setItems(r?.value ? JSON.parse(r.value) : SAMPLE);
-        if (!r?.value) await window.storage.set(STORAGE_KEY, JSON.stringify(SAMPLE));
+        if (!r?.value) await storage.set(STORAGE_KEY, JSON.stringify(SAMPLE));
       } catch { setItems(SAMPLE); }
       setLoading(false);
     })();
@@ -192,7 +197,7 @@ export default function DiscoveryBoard() {
 
   async function persist(updated) {
     setItems(updated);
-    try { await window.storage.set(STORAGE_KEY, JSON.stringify(updated)); }
+    try { await storage.set(STORAGE_KEY, JSON.stringify(updated)); }
     catch(e) { console.error("storage save failed", e); }
   }
 
