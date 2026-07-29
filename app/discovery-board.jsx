@@ -10,6 +10,11 @@ import {
 // the scoring/metrics layer; here we surface the emitter-backlog volume and the
 // facet-binding triage promotion. Additive; density/funnel gating is structural.
 import { funnelMetrics, triagePromotionPatch } from "./lib/board-metrics.mjs";
+// S3-3: two-tier triage. `autoFacets` cheaply PRE-computes a PROVISIONAL facet
+// suggestion (offline embedding band + conservative surprise/impact) for an
+// `emitted` note; `confirmTriage` is the ONE fast human-confirm that binds the
+// facets and promotes emitted→New (delegating to triagePromotionPatch above).
+import { autoFacets, confirmTriage } from "./lib/triage.mjs";
 
 const STORAGE_KEY = "serendipity-discoveries-v1";
 
@@ -602,6 +607,33 @@ Respond ONLY with valid JSON, no markdown:
             Set the facets above, then promote to New to bind the profile and start it counting.
           </p>
         )}
+        {/* S3-3 TIER 1: a cheap, offline PROVISIONAL suggestion + one-click confirm.
+            Computed inline (deterministic, no clock/RNG); clearly labelled a guess so
+            it never masquerades as a human-confirmed fact. Nullable-safe. */}
+        {disc.status==="emitted" && (() => {
+          let sug = null;
+          try { sug = autoFacets(disc, allItems || []); } catch { sug = null; }
+          if (!sug) return null;
+          const onConfirm = () =>
+            onUpdate(disc.id, confirmTriage(disc, sug, { date: new Date().toISOString().split("T")[0] }));
+          return (
+            <div style={{marginBottom:"0.6rem",padding:"0.5rem 0.6rem",border:"1px dashed #7c859855",borderRadius:"0.4rem",background:"#7c859810"}}>
+              <div style={{fontSize:"0.58rem",fontFamily:"'DM Mono',monospace",color:"#a78bfa",letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:"0.35rem"}}>
+                ◇ Tier-1 provisional suggestion <span style={{color:"#7c8598"}}>(a guess — review before confirming)</span>
+              </div>
+              <div style={{fontSize:"0.66rem",color:"#b8c0cc",marginBottom:"0.45rem"}}>
+                band <b>{sug.distanceBand}</b> · d≈<b>{sug.domainDistance.toFixed(2)}</b> ·
+                surprise <b>{sug.surprise}/5</b> · impact <b>{sug.impact}/10</b>
+                <span style={{color:"#7c8598"}}> — {sug.rationale?.distance}</span>
+              </div>
+              <button onClick={onConfirm}
+                style={{...css.moveBtn, background:"#a78bfa1e", borderColor:"#a78bfa55", color:"#a78bfa"}}
+                title="Bind these provisional facets and promote emitted → New">
+                ✓ Confirm suggestion → Triage
+              </button>
+            </div>
+          );
+        })()}
         <div style={{display:"flex",gap:"0.4rem",flexWrap:"wrap"}}>
           {(STATUS_META[disc.status]?.next||[]).map(s => {
             const m = STATUS_META[s];
