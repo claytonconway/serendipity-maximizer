@@ -236,7 +236,11 @@ export function ingestCapture(payload, opts = {}) {
     summary: isNonEmptyString(payload.summary) ? payload.summary : "",
     // ── facets UNBOUND (nullable) — bound at triage, exactly like emitAmbient ─
     owner: "",
-    teamVisible: true,
+    // Private by default — nothing leaves the user's environment (locked gate).
+    // A capture becomes shared/public only via an explicit, separate user action
+    // (e.g. promoting a discovery to a public artifact). Connector-level overrides
+    // (e.g. native-capture) are now belt-and-suspenders rather than the sole guard.
+    teamVisible: false,
     convergence: false,
     refinementNotes: "",
     decision: "",

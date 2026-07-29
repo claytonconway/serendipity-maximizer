@@ -61,6 +61,8 @@ assert(note.provenance.generatedAtTime === NOW && note.discoveredDate === NOW,
   "prov:generatedAtTime = caller-supplied capturedAt (no clock read in-module)");
 assert(Array.isArray(note.domains) && note.domains.length === 0,
   "S2-1 facets are UNBOUND at capture (bound later at triage)");
+assert(note.teamVisible === false,
+  "PRIVATE BY DEFAULT: ingested captures are teamVisible:false (nothing leaves the environment)");
 
 // ── (c) SOURCE-AGNOSTIC: two different sources, ONE code path ─────────────────
 console.log("\n(c) source-agnostic — two different sources, one ingestCapture path");
