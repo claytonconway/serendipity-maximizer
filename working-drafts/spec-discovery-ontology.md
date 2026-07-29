@@ -1,8 +1,8 @@
 # Spec S1-0 · Serendipitous Discovery Ontology
 
 **Author:** Fleming (Discovery Scientist) · **Date:** 2026-07-28
-**Status:** DRAFT (rev 2 — re-grounded on W3C standards per PO/SM decision) for SM (Orin) review → PO (Clayton) uses it for S1-1.
-**Sprint item:** S1-0 (upstream of all). **Artifact type:** spec / vocabulary. No framework code touched. **Uncommitted** (PO deciding artifact homes; do not commit until Orin relays).
+**Status:** rev 3 — S1-1-coupling edits applied (Flags A–E: `BridgeShape` rescoped, similarity≠serendipity split into soft+hard layers, priority FLOOR→soft floor, density→ValueScore-weighted, ValueScore/RankScore registered as derived measures). rev 2 was LIVE on public master (PR #1); this rev is a spec **edit** requiring a second framework PR (Orin shepherds).
+**Sprint item:** S1-0 (upstream of all). **Artifact type:** spec / vocabulary. No framework code touched.
 **Boundary:** checked against `.boundary-blocklist` — no blocked terms; sample cases reuse the repo's existing generic board data (warehouse robotics / cold-storage / SRE).
 
 > **One-line charter.** A shared, typed vocabulary for characterizing a discovery, so that
@@ -28,8 +28,12 @@ is explicit per component (§0.1) and the places a standard *doesn't* fit are ca
 that reasoning is itself a durable output.
 
 **Guardrail carried through every facet: similarity ≠ serendipity.** Nearest-neighbor returns the
-obvious. Serendipity is the *mid-distance, cross-domain* neighbor. This ontology encodes that as a
-structural constraint (§7, shape `BridgeShape` + the domain-distance band), not just a reminder.
+obvious. Serendipity is the *mid-distance, cross-domain* neighbor. Per the S1-1 reframe this is now
+enforced in **two complementary layers**, not one: (1) a **soft value weight** — the peaked `g_dist`
+term in S1-1's ValueScore down-weights too-close (cliché) and too-far (noise) *without ever excluding*
+the discovery; and (2) a **hard claim-integrity check** — `BridgeShape` (§7.2) rejects an edge *typed*
+`bridges` whose endpoints aren't mid-distance, which **retypes the claim, not the discovery**. Value
+judgment = soft; data-integrity = hard. (Reconciliation: `spec-value-weighting.md` §6.)
 
 ### 0.1 Standards fit map
 
@@ -87,6 +91,18 @@ Priority already decomposes as `(Impact × Serendipity_Potential) ÷ Effort_weig
   facet doesn't feed S1-1/S1-2/S1-3, it isn't here. Adopting standards keeps it lean *and*
   tool-checkable rather than bespoke.
 
+### 1.2 Derived measures (registered here, defined in S1-1)
+Two computed measures ride on top of the facets; registered in the ontology as derived properties so
+downstream specs share one definition:
+
+| Measure | RDF property | Definition (canonical source) |
+|---------|--------------|-------------------------------|
+| **ValueScore** ∈ [0,1] | `:valueScore` | `TypeMult(F1)·[w_dist·g_dist(F3)+w_surp·g_surp(F4)+w_imp·g_imp(F5)+w_gen·g_gen(F6)+w_sp·g_sp(F9)]` — the graded, no-exclusion value weight. See `spec-value-weighting.md` §1 (weights PO-ratified). |
+| **RankScore** | `:rankScore` | `ValueScore ÷ Effort_weight` — pursuit ordering; preserves the board's existing priority intuition. |
+
+These are *derived* (not stored facets): recomputed from F1/F3/F4/F5/F6/F9 as weights tune. `ValueScore`
+is what the density sum (§6) weights by, and what the soft floor (S1-1 §4) reads.
+
 ---
 
 ## 2. Facet detail: the two purpose-built axes that do the heavy lifting
@@ -107,9 +123,11 @@ formalizes the thresholds empirically. S1-0 fixes the **scale and three qualitat
 
 - Band **thresholds are `TBD-S1-2`** — S1-2 sets them with empirical basis. S1-0 owns only the
   *shape*: three bands, serendipity is the middle one.
-- **Structural home of "similarity ≠ serendipity."** A discovery whose connected domains sit in
-  `too-close` is a restatement; in `too-far` is likely noise. Shape `BridgeShape` (§7) *requires* the
-  middle band — the guardrail is enforced, not just documented.
+- **Two-layer home of "similarity ≠ serendipity."** A discovery whose connected domains sit in
+  `too-close` is a restatement; in `too-far` is likely noise. Handled in two ways: **softly** — the
+  peaked `g_dist` value weight (S1-1) scores both tails low but **never excludes** the discovery; and
+  **hard** — shape `BridgeShape` (§7.2) rejects a *bridge claim* outside the band (retype, don't drop).
+  The band edges `[τ_lo, τ_hi]` both layers reference are set empirically in S1-2.
 - **Relationship to SKOS (§3):** SKOS gives each domain a stable identity and a broader/narrower
   hierarchy; it does **not** give a continuous metric. Distance is embedding-derived and *anchored to*
   SKOS concepts. (Flagged in §8 — this is the cleanest example of a standard fitting the identity
@@ -212,28 +230,32 @@ can't supply — which is why F2 (SKOS anchor) + F7 (PROV-O) *together* make den
 
 **The requirement:** detect when *enough discoveries cluster in one domain*. F2 (SKOS Domain Anchor) +
 F7 (PROV-O `generatedAtTime`, `captureMode`) supply exactly what's needed. Density is defined
-formally so S1-3 inherits a computable metric (purpose-built — no standard for this):
+formally so S1-3 inherits a computable metric (purpose-built — no standard for this). **Per the S1-1
+reframe, density is a `ValueScore`-weighted SUM, not a FLOOR-gated count** — no-exclusion applied to
+the density signal: low-value discoveries contribute *fractionally*, never zero:
 
 ```
-density(d, W) = | { discovery x :
+density(d, W) = Σ  ValueScore(x)     over discoveries x with:
                       d ∈ x.domains                    # SKOS concept membership (F2)
                       ∧ x.generatedAtTime ∈ W          # PROV-O window (F7)
-                      ∧ priority(x) ≥ FLOOR            # FLOOR set by PO in S1-1
-                  } |
+                                                        # NO hard floor — value-weighted, not gated
 ```
 
-- `d` = a `skos:Concept` from the domain scheme (§3); `W` = a rolling window; `FLOOR` = the priority
-  bar S1-1 sets. All three inputs come from facets this ontology defines.
+- `d` = a `skos:Concept` from the domain scheme (§3); `W` = a rolling window; `ValueScore(x)` ∈ [0,1]
+  is S1-1's graded value (`spec-value-weighting.md`). All inputs come from facets this ontology defines.
+- **Soft floor (was a hard FLOOR):** a discovery with `ValueScore < 0.35` (S1-1) is *Bank-eligible* and
+  down-weighted, but **still counts** — its small `ValueScore` is exactly its small contribution here.
+  Nothing is excluded from the density signal.
 - **Venture / partnership candidate (detection only).** When `density(d, W) ≥ DENSITY_THRESHOLD`
   (set in S1-3), domain `d` is flagged a **venture/partnership candidate** and escalated to the PO.
   *The ontology defines the measurable and the flag; the go/no-go stays with the PO.* Engine detects
   and escalates; PO decides. (Hard line, per charter + sprint risk log.)
-- **Why density needs the ontology:** you cannot count "discoveries in a domain above a value bar"
+- **Why density needs the ontology:** you cannot value-weight "discoveries clustering in a domain"
   until discoveries are (a) anchored to SKOS domains and (b) scored on shared facets. That's why S1-0
   is upstream of the venture-candidate output.
-- **Anti-inflation guard:** density counts only discoveries at/above `FLOOR` and weights
-  `captureMode = ambient-emitter` items until they pass triage — so a flood of cheap ambient captures
-  can't fake a cluster. (Ties to the S1-4 emitter spike and the "capture inflation" risk.)
+- **Anti-inflation guard:** because contribution = `ValueScore`, a flood of low-value ambient captures
+  adds little; `captureMode = ambient-emitter` items are further weighted down until they pass triage,
+  so cheap volume can't fake a cluster. (Ties to the S1-4 emitter spike and the "capture inflation" risk.)
 
 ---
 
@@ -266,18 +288,25 @@ Plus: Type **B** ⇒ ≥2 domains (qualified cardinality on `:primaryDomain`+`:s
 `surprise ≥ 4` ⇒ epistemic marker present (`sh:Warning`); lifecycle transitions restricted to the
 board's allowed `next[]` edges (a `sh:sparql` check against prior state — §7.3).
 
-### 7.2 The guardrail shape — `BridgeShape` (core SHACL)
-**This is "similarity ≠ serendipity" made structural.** A `:bridges` edge is only well-formed when the
-subject sits in the serendipity band:
+### 7.2 The bridge-claim integrity shape — `BridgeShape` (core SHACL)
+**Scope (rev 3): this validates a `bridges` *claim*, not a discovery's worth.** An edge *typed*
+`bridges` is well-formed only when its endpoints sit in the serendipity band; outside it, the edge is a
+mis-typed assertion ("this isn't a bridge"). Severity stays `sh:Violation` — but the **remedy is to
+*retype* the edge/discovery, never to exclude the discovery**, which stays and is weighted normally
+(often it was an Anomaly, not a Bridge):
 
 ```turtle
 :BridgeShape a sh:NodeShape ;
   sh:targetSubjectsOf :bridges ;
   sh:property [ sh:path :distanceBand ; sh:hasValue "serendipity-band" ;
                 sh:severity sh:Violation ;
-                sh:message "bridges edge requires mid-distance band (not cliché, not noise)" ] .
+                sh:message "a `bridges` CLAIM requires the mid-distance band; outside it, RETYPE the claim — do not exclude the discovery" ] .
 ```
-A `bridges` into `too-close` (cliché) or `too-far` (noise) is **rejected as malformed**.
+
+Note the division of labour: this hard check answers *"is this a well-formed bridge claim?"* (integrity).
+Whether a too-close/too-far discovery is *valuable* is a separate, **soft** question answered by the
+peaked `g_dist` weight in S1-1 (which down-weights but never drops). One band definition (`τ_lo,τ_hi`
+from S1-2), two consumers — hard claim-check here, soft value-weight in S1-1.
 
 ### 7.3 Constraints that exceed core SHACL → SPARQL-based SHACL (flagged)
 Two rules are **not expressible in core SHACL** and require `sh:SPARQLConstraint` (still SHACL, but
