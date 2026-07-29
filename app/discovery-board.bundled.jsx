@@ -4,7 +4,7 @@
 // React-artifact hosts that cannot resolve sibling ESM imports.
 // Source of truth stays in app/discovery-board.jsx + app/lib/*.mjs (relative ESM).
 // Regenerate: node scripts/build-board.mjs
-// Inlined modules: board-metrics, board-scoring, semantic-convergence, steering-loop, storage-adapter, triage
+// Inlined modules: board-metrics, board-scoring, ingest, native-capture, semantic-convergence, steering-loop, storage-adapter, triage
 // ============================================================================
 import { useState, useEffect, useMemo } from "react";
 
@@ -720,6 +720,293 @@ function createStorage(win) {
 }
 
 exports["createStorage"] = createStorage;
+
+};
+
+__sm_modules["native-capture"] = function (module, exports, __sm_require) {
+// native-capture.mjs — S3-2: the Clairvoyance-native capture connector.
+// ============================================================================
+// Implementation #1 of the S3-1 `CaptureSource` / `defineSource` contract
+// (ingest.mjs). A Staff member or agent, as a BYPRODUCT of doing its work,
+// notices a genuine surprise and emits a DISTILLED capture; that capture flows
+// through the SAME S3-1 `ingestCapture` path into the local board store as a
+// pre-triage `emitted` note. No new lifecycle, no new gate — it rides the
+// socket S3-1 already built.
+//
+// THIS IS PRIVACY-CRITICAL. The following constraints are RATIFIED and enforced
+// in code here (and proven by native-capture.smoke.mjs):
+//
+//   1. USER-LOCAL, user-owned, per-install. The connector performs ZERO remote
+//      I/O — no server calls, no telemetry, no phone-home. Captures go ONLY to
+//      the local board store via S3-1 `ingestCapture`. (Structural: this module
+//      references no remote-I/O API whatsoever — proven by a source scan.)
+//   2. DISTILLED-ONLY. The stored note carries a distilled surprise — what /
+//      where / why — plus minimal provenance, and NEVER raw conversation
+//      content. `distill()` reads ONLY the distilled fields off its input; any
+//      raw transcript / message body / unknown field is structurally dropped,
+//      never copied onto the note.
+//   3. LOCAL ADAPTER ONLY. Persistence rides the board's OWN local storage
+//      adapter (the `window.storage` / localStorage shape: async get/set on a
+//      JSON-array corpus). This module adds NO storage layer of its own — it
+//      reads and rewrites the board's existing corpus through the injected
+//      adapter.
+//   4. NEVER AUTO-PUBLIC. A capture is PRIVATE board state. This connector sets
+//      NO public flag, ever, and marks native captures `teamVisible: false`
+//      (private-to-user) — overriding S3-1's inherited `teamVisible: true`
+//      default, since team capture-sharing is deferred (see below). A capture
+//      becomes public ONLY if the user LATER explicitly promotes a discovery via
+//      the existing separate artifact-promotion flow — untouched here.
+//   5. OPT-IN PER SURFACE. A per-surface enable registry, DEFAULT OFF. A capture
+//      fires ONLY for surfaces the user has explicitly opted in. enable/disable
+//      provided.
+//   6. VIEW + PURGE ANYTIME. `listNativeCaptures(store)` returns the native
+//      capture log; `purgeNativeCaptures(store)` deletes them from the local
+//      store. Both operate only on native-source notes and leave everything else
+//      in the corpus untouched.
+//
+//   DEFERRED — NOT BUILT HERE (constraint 7): group/team capture-sharing. Out of
+//   scope for S3-2; a native capture is private-to-user board state only.
+//
+//   DEFERRED — board-UI surfacing (a capture-log view + purge button + per-
+//   surface opt-in toggle in discovery-board.jsx) is a thin follow-up the SM
+//   runs AFTER S3-5 lands. NOT built here (would collide with the in-flight
+//   S3-5 board edit). This module exposes the APIs that wiring will call.
+//
+//   FOLLOW-UP (out of S3-2 scope): S3-1's `ingestCapture` hardcodes
+//   `teamVisible: true` for all ingested captures. That default should later be
+//   reconsidered toward private-by-default at the contract level; for now we
+//   override per-note here.
+//
+// Zero-dep, offline, deterministic: this module reads NO clock and NO RNG. The
+// caller supplies `now` at the UI edge (exactly as the S3-1 contract does).
+// ============================================================================
+
+const { defineSource, ingestFrom } = __sm_require("ingest");
+
+const isNonEmptyString = (x) => typeof x === "string" && x.trim().length > 0;
+
+// ─── Identity ────────────────────────────────────────────────────────────────
+// The stable source id (spec S3-2). Every native capture's `note.source` equals
+// this — it is the canonical way to identify a native capture in the corpus.
+const NATIVE_SOURCE_ID = "clairvoyance-native";
+// A redundant human-visible marker tag carried on the note (does not gate
+// identity — `note.source` is canonical — but helps a future UI filter/label).
+const NATIVE_CAPTURE_TAG = "native-capture";
+// The board's OWN corpus key (discovery-board.jsx `STORAGE_KEY`). We ride the
+// board's local adapter under this key rather than inventing storage. The
+// deferred board-UI wiring may pass an explicit key; this is the default.
+const BOARD_STORAGE_KEY = "serendipity-discoveries-v1";
+
+/**
+ * DISTILL a native surprise into an S3-1 CapturePayload — the privacy core.
+ *
+ * This is the source's `normalize(raw)`. It reads ONLY the distilled fields the
+ * emitter supplies — `what` (the surprise, one line), `where` (the locus/
+ * surface), `why` (why it is surprising) — plus optional minimal provenance
+ * (`surface`, `capturedAt`, `externalId`, distilled `tags`). It NEVER reads a
+ * raw transcript / message body / conversation object: any such field on `raw`
+ * is structurally ignored and thus can never reach the stored note. The
+ * connector cannot police the SEMANTIC content a caller stuffs into `what`/
+ * `why` — that discipline is the capture-directive doc's job — but STRUCTURALLY,
+ * only distilled fields ever cross this boundary.
+ *
+ * @param {{what:string, where?:string, why?:string, surface?:string,
+ *          capturedAt?:string, externalId?:string, tags?:string[]}} raw
+ * @returns {{title:string, summary:string, capturedAt?:string,
+ *            externalId?:string, tags:string[]}}
+ */
+function distill(raw) {
+  const r = raw || {};
+  // `what` is the surprise headline → becomes the note title (S3-1 requires it).
+  const what = isNonEmptyString(r.what) ? r.what.trim() : "";
+  const where = isNonEmptyString(r.where) ? r.where.trim() : "";
+  const why = isNonEmptyString(r.why) ? r.why.trim() : "";
+  const surface = isNonEmptyString(r.surface) ? r.surface.trim() : "";
+
+  // Distilled body: a compact where/why line. These are the emitter's own
+  // distilled phrasings, NOT copied raw content.
+  const parts = [];
+  if (where) parts.push(`Where: ${where}`);
+  if (why) parts.push(`Why it surprised: ${why}`);
+  const summary = parts.join(" · ");
+
+  // Tags: the native marker, the surface (so the log is filterable), and any
+  // distilled free tags the emitter passed. Nothing raw.
+  const tags = [NATIVE_CAPTURE_TAG];
+  if (surface) tags.push(`surface:${surface}`);
+  if (Array.isArray(r.tags)) for (const t of r.tags) if (isNonEmptyString(t)) tags.push(t.trim());
+
+  return {
+    title: what,
+    summary,
+    ...(isNonEmptyString(r.capturedAt) ? { capturedAt: r.capturedAt } : {}),
+    ...(isNonEmptyString(r.externalId) ? { externalId: r.externalId } : {}),
+    tags,
+  };
+}
+
+// The S3-2 CaptureSource — a DROP-IN adapter, defined against the S3-1 contract
+// with zero edits to ingest.mjs. `normalize` is the distiller above.
+const nativeSource = defineSource({
+  id: NATIVE_SOURCE_ID,
+  label: "Clairvoyance (native)",
+  agentLabel: "Clairvoyance",
+  normalize: distill,
+});
+
+/** Canonical identity check: is this corpus note a native capture? */
+const isNativeCapture = (note) =>
+  note != null && note.source === NATIVE_SOURCE_ID;
+
+// ─── Constraint 5: per-surface OPT-IN registry (default OFF) ──────────────────
+/**
+ * A tiny enable registry. Nothing is enabled until the user opts a surface in;
+ * `isEnabled` is false for any surface not explicitly enabled. Injectable so
+ * tests (and isolated call sites) never leak global state.
+ */
+function createSurfaceRegistry(initial = []) {
+  const on = new Set();
+  for (const s of initial) if (isNonEmptyString(s)) on.add(s.trim());
+  return {
+    enable(surface) { if (isNonEmptyString(surface)) on.add(surface.trim()); return this; },
+    disable(surface) { if (isNonEmptyString(surface)) on.delete(surface.trim()); return this; },
+    isEnabled(surface) { return isNonEmptyString(surface) && on.has(surface.trim()); },
+    enabled() { return [...on]; },
+    clear() { on.clear(); return this; },
+  };
+}
+
+// The process-wide default registry. DEFAULT OFF — empty until the user opts in.
+const defaultRegistry = createSurfaceRegistry();
+const enableSurface = (surface) => defaultRegistry.enable(surface);
+const disableSurface = (surface) => defaultRegistry.disable(surface);
+const isSurfaceEnabled = (surface) => defaultRegistry.isEnabled(surface);
+const enabledSurfaces = () => defaultRegistry.enabled();
+
+/**
+ * Apply the S3-2 privacy overrides to an S3-1 emitted note. Additive: takes the
+ * plain object `ingestCapture` returned and returns a copy with native-capture
+ * privacy invariants pinned. Sets NO public flag (constraint 4) and forces
+ * `teamVisible: false` (private-to-user; overrides S3-1's inherited `true`).
+ */
+function applyPrivacyOverrides(note) {
+  return { ...note, teamVisible: false };
+}
+
+// ─── Constraint 2/4/5: build a distilled, private, gated capture note ────────
+/**
+ * captureSurprise — the emitter's entry point. PURE and clock-free: it gates on
+ * the opt-in registry and, if the surface is enabled, DISTILLS the input into a
+ * private `emitted` note via the S3-1 path. Returns the note, or `null` when the
+ * surface is not opted in (a genuine no-op — nothing is built, nothing stored).
+ *
+ * It does NOT persist by itself — persistence is a separate, explicit step
+ * (`recordCapture` / the deferred board wiring) so this stays a pure builder.
+ *
+ * @param {{what:string, where?:string, why?:string, surface:string,
+ *          capturedAt?:string, externalId?:string, tags?:string[]}} input
+ * @param {{registry?:object, now?:string, id?:string}} [opts]
+ * @returns {object|null} the private `emitted` note, or null if not opted-in
+ */
+function captureSurprise(input, opts = {}) {
+  const registry = opts.registry || defaultRegistry;
+  const surface = input && input.surface;
+  // Constraint 5: fire ONLY for an opted-in surface. Otherwise no-op.
+  if (!registry.isEnabled(surface)) return null;
+  // Build the emitted note through the S3-1 socket, then pin privacy invariants.
+  const note = ingestFrom(nativeSource, input, { now: opts.now, id: opts.id });
+  return applyPrivacyOverrides(note);
+}
+
+// ─── Constraint 3: ride the board's local adapter (no new storage) ───────────
+// The board's adapter is the async `window.storage` shape: `get(key) ->
+// { value:<json> }` and `set(key, <json>)`, over a JSON-array corpus. These
+// helpers read/rewrite THAT corpus; they invent no persistence of their own.
+async function readCorpus(store, key) {
+  if (!store || typeof store.get !== "function" || typeof store.set !== "function") {
+    throw new TypeError(
+      "native-capture: store must be the board's local adapter { get(key), set(key,value) }."
+    );
+  }
+  const r = await store.get(key);
+  if (!r || !isNonEmptyString(r.value)) return [];
+  const parsed = JSON.parse(r.value);
+  return Array.isArray(parsed) ? parsed : [];
+}
+async function writeCorpus(store, key, arr) {
+  await store.set(key, JSON.stringify(arr));
+}
+
+/**
+ * recordCapture — the full local-only path in one call for the deferred board
+ * wiring: gate + distill + persist onto the board's existing corpus via its own
+ * adapter. Prepends (newest-first, matching the board's addItem). Returns the
+ * stored note, or null if the surface was not opted-in (nothing written).
+ *
+ * @param {object} store   - the board's local adapter { get, set }
+ * @param {object} input   - see captureSurprise
+ * @param {{registry?:object, now?:string, id?:string, key?:string}} [opts]
+ * @returns {Promise<object|null>}
+ */
+async function recordCapture(store, input, opts = {}) {
+  const note = captureSurprise(input, opts);
+  if (note == null) return null; // not opted-in → no-op, nothing persisted
+  const key = opts.key || BOARD_STORAGE_KEY;
+  const corpus = await readCorpus(store, key);
+  await writeCorpus(store, key, [note, ...corpus]);
+  return note;
+}
+
+// ─── Constraint 6: VIEW + PURGE the native capture log ───────────────────────
+/**
+ * listNativeCaptures — the user's view of their native capture log. Reads the
+ * board corpus through the local adapter and returns ONLY native-source notes,
+ * newest-first as stored. Non-native discoveries are never returned.
+ *
+ * @param {object} store
+ * @param {{key?:string}} [opts]
+ * @returns {Promise<object[]>}
+ */
+async function listNativeCaptures(store, opts = {}) {
+  const key = opts.key || BOARD_STORAGE_KEY;
+  const corpus = await readCorpus(store, key);
+  return corpus.filter(isNativeCapture);
+}
+
+/**
+ * purgeNativeCaptures — delete native captures from the local store. Rewrites
+ * the corpus keeping every NON-native note untouched and dropping every native
+ * one. Returns what was removed and what remains, so a UI can confirm.
+ *
+ * @param {object} store
+ * @param {{key?:string}} [opts]
+ * @returns {Promise<{removedCount:number, removed:object[], remaining:number}>}
+ */
+async function purgeNativeCaptures(store, opts = {}) {
+  const key = opts.key || BOARD_STORAGE_KEY;
+  const corpus = await readCorpus(store, key);
+  const removed = corpus.filter(isNativeCapture);
+  const remaining = corpus.filter((n) => !isNativeCapture(n));
+  await writeCorpus(store, key, remaining);
+  return { removedCount: removed.length, removed, remaining: remaining.length };
+}
+
+exports["NATIVE_SOURCE_ID"] = NATIVE_SOURCE_ID;
+exports["NATIVE_CAPTURE_TAG"] = NATIVE_CAPTURE_TAG;
+exports["BOARD_STORAGE_KEY"] = BOARD_STORAGE_KEY;
+exports["nativeSource"] = nativeSource;
+exports["isNativeCapture"] = isNativeCapture;
+exports["defaultRegistry"] = defaultRegistry;
+exports["enableSurface"] = enableSurface;
+exports["disableSurface"] = disableSurface;
+exports["isSurfaceEnabled"] = isSurfaceEnabled;
+exports["enabledSurfaces"] = enabledSurfaces;
+exports["distill"] = distill;
+exports["createSurfaceRegistry"] = createSurfaceRegistry;
+exports["captureSurprise"] = captureSurprise;
+exports["recordCapture"] = recordCapture;
+exports["listNativeCaptures"] = listNativeCaptures;
+exports["purgeNativeCaptures"] = purgeNativeCaptures;
 
 };
 
@@ -1670,6 +1957,311 @@ exports["LocalHashEmbeddingProvider"] = LocalHashEmbeddingProvider;
 
 };
 
+__sm_modules["ingest"] = function (module, exports, __sm_require) {
+// ingest.mjs — S3-1: the CONNECTOR-AGNOSTIC capture-ingest contract.
+// ============================================================================
+// This is the SOCKET that capture connectors plug into. It defines ONE code
+// path that turns a normalized capture from ANY source into an `emitted` note,
+// wired through the SAME S2-4 pre-triage pipeline the board already runs — so
+// the "Emitted ≠ counted (yet)" gate (spec-funnel-metric.md §2) holds for
+// ingested captures automatically, with no new gate logic here.
+//
+// WHAT THIS IS
+//   • `ingestCapture(payload, { source })` — source-agnostic: accepts a
+//     normalized capture and produces a well-formed `emitted` note.
+//   • `CaptureSource` — the adapter interface every connector implements
+//     (`{ id, normalize(raw) -> payload }`). Any connector is DROP-IN: the
+//     Clairvoyance-native connector (S3-2) is implementation #1; Claude.ai /
+//     ChatGPT / Slack / notes slot in later with NO core edit here.
+//   • `manualSource` — ONE trivial reference source proving the socket. It is
+//     NOT a real external connector and reads nothing from the outside world.
+//
+// WHAT THIS IS NOT (scope guard, S3-1 only)
+//   • No specific/real connector. No decision about WHAT external content to
+//     read — that is S3-2 (gated). The `source` is just an id + a normalizer.
+//   • No lifecycle change beyond S2-4. No fork of the density/funnel pipeline.
+//
+// PROVENANCE (spec-discovery-ontology.md §5, PROV-O)
+//   The emitted note is a `prov:Entity` that `prov:wasGeneratedBy` a
+//   `:CaptureActivity`. That activity carries the `captureMode` and the
+//   `source` id. Because the entity records its capture activity, triage's
+//   existing `prov:wasDerivedFrom` / `prov:wasRevisionOf` link keeps working:
+//   the triaged discovery is a revision of THIS captured entity.
+//
+// PRIVACY / DETERMINISM
+//   Source-agnostic and private by default: every capture lands in the local
+//   board/`emitted` store via the same path as the in-app ambient emitter.
+//   Zero-dep, offline, deterministic — this module reads NO clock and NO RNG;
+//   the caller supplies `capturedAt` (the board does the clock read at the UI
+//   edge, exactly as `emitAmbient` does). Pure + nullable-safe; never throws
+//   on a well-formed adapter, and throws a clear, typed error on a malformed
+//   one so connector authors get an actionable message.
+// ============================================================================
+
+const { PRE_TRIAGE_STATUS } = __sm_require("board-scoring");
+
+// The captureMode enum (spec §1 F7). Ingested captures default to
+// `ambient-emitter` — the cheap/hot pre-triage entry — so they land exactly
+// where the in-app emitter's captures do. The GATE, however, keys off
+// `status === "emitted"`, NOT captureMode, so it holds for any of these.
+const CAPTURE_MODES = ["deliberate-scan", "ambient-emitter", "manual"];
+const DEFAULT_CAPTURE_MODE = "ambient-emitter";
+
+/**
+ * A normalized capture — the source-agnostic payload every adapter emits.
+ * @typedef {Object} CapturePayload
+ * @property {string}   title         - REQUIRED. The capture note / one-line title.
+ * @property {string}   [summary]     - Optional body text.
+ * @property {string}   [capturedAt]  - ISO timestamp → prov:generatedAtTime. If
+ *                                       absent, `opts.now` is used; document that
+ *                                       one of the two must be supplied.
+ * @property {string}   [externalId]  - Source-native id (e.g. a message/thread id).
+ *                                       Used for a stable note id + prov reference.
+ * @property {string[]} [tags]        - Optional free tags carried onto the note.
+ */
+
+/**
+ * The adapter contract. A connector is nothing more than this: a stable `id`
+ * and a pure `normalize(raw) -> CapturePayload`. NO other core change is ever
+ * needed to add a source.
+ * @typedef {Object} CaptureSource
+ * @property {string} id                         - REQUIRED. Stable source id
+ *                                                  ("clairvoyance", "manual",
+ *                                                  "slack", ...). Becomes note.source.
+ * @property {(raw:any) => CapturePayload} normalize - REQUIRED. Maps raw source
+ *                                                  data → a CapturePayload.
+ * @property {string} [label]                    - Human label for the source.
+ * @property {string} [agentLabel]               - prov:wasAttributedTo software-agent
+ *                                                  label. Defaults to `label`/`id`.
+ */
+
+const isNonEmptyString = (x) => typeof x === "string" && x.trim().length > 0;
+
+class IngestContractError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "IngestContractError";
+  }
+}
+exports["IngestContractError"] = IngestContractError;
+
+/**
+ * Validate + freeze an adapter so connectors are DROP-IN and self-describing.
+ * Throws IngestContractError with an actionable message if the contract is not
+ * met. Returns a frozen CaptureSource. This is the ONLY thing a new connector
+ * (S3-2 and beyond) must call — no edit to this module is required to add one.
+ * @param {CaptureSource} spec
+ * @returns {CaptureSource}
+ */
+function defineSource(spec) {
+  if (!spec || typeof spec !== "object") {
+    throw new IngestContractError("defineSource(spec): spec must be an object.");
+  }
+  if (!isNonEmptyString(spec.id)) {
+    throw new IngestContractError("CaptureSource.id must be a non-empty string.");
+  }
+  if (typeof spec.normalize !== "function") {
+    throw new IngestContractError(
+      `CaptureSource "${spec.id}": normalize(raw) must be a function.`
+    );
+  }
+  return Object.freeze({
+    id: spec.id,
+    normalize: spec.normalize,
+    label: spec.label || spec.id,
+    agentLabel: spec.agentLabel || spec.label || spec.id,
+  });
+}
+
+// A deterministic, clock-free, RNG-free note id. Prefer an explicit id, then a
+// stable `source:externalId` key (so a source with real native ids dedupes),
+// then a slug of the title namespaced by source. No global counter (that would
+// couple ingest to board state); the board may re-key on persist if it wants
+// its DISC-### scheme — the pipeline only needs a non-null id.
+function deriveId(source, payload, opts) {
+  if (isNonEmptyString(opts.id)) return opts.id;
+  if (isNonEmptyString(payload.externalId)) {
+    return `${source.id}:${payload.externalId.trim()}`;
+  }
+  const slug = String(payload.title || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return `${source.id}:${slug || "capture"}`;
+}
+
+/**
+ * Build the PROV-O provenance block for an ingested capture (spec §5).
+ *
+ * The note is a `prov:Entity` generated by a `:CaptureActivity` that carries
+ * the `captureMode` and the originating `source` id. `generatedAtTime` is the
+ * capture timestamp. Triage later attaches `prov:wasRevisionOf` back to this
+ * entity, so `wasDerivedFrom` provenance keeps working unchanged.
+ */
+function buildProvenance({ source, captureMode, capturedAt, payload }) {
+  const activity = {
+    "@type": ["prov:Activity", ":CaptureActivity"],
+    captureMode,
+    source: source.id, // the source id the CaptureActivity carries (S3-1)
+  };
+  if (capturedAt != null) {
+    activity.startedAtTime = capturedAt;
+    activity.endedAtTime = capturedAt;
+  }
+  if (isNonEmptyString(payload.externalId)) {
+    activity.sourceRef = payload.externalId.trim();
+  }
+  return {
+    "@type": "prov:Entity",
+    wasGeneratedBy: activity,
+    ...(capturedAt != null ? { generatedAtTime: capturedAt } : {}),
+    wasAttributedTo: source.agentLabel || source.id,
+  };
+}
+
+/**
+ * ingestCapture — the source-agnostic core of the contract.
+ *
+ * Turn a normalized CapturePayload into an `emitted` note that flows through
+ * the SAME S2-4 pre-triage pipeline the in-app emitter uses. The returned note:
+ *   • has `status: "emitted"` → the gate (board-scoring.isPreTriage) holds, so
+ *     it contributes 0 to density and the funnel `captured` denominator until
+ *     triaged, appearing only in the unweighted emitter backlog;
+ *   • carries `captureMode` (default ambient-emitter), `source`, and a PROV-O
+ *     `provenance` block modelling it as a prov:Entity + :CaptureActivity;
+ *   • leaves all S2-1 facets UNBOUND (nullable) — they are bound at triage
+ *     (triagePromotionPatch), exactly as an in-app ambient capture.
+ *
+ * @param {CapturePayload} payload  - a normalized capture (from source.normalize)
+ * @param {Object} opts
+ * @param {CaptureSource} opts.source     - REQUIRED. The originating adapter.
+ * @param {string} [opts.now]             - ISO fallback capture time when the
+ *                                          payload omits `capturedAt`.
+ * @param {string} [opts.captureMode]     - override (must be in CAPTURE_MODES).
+ * @param {string} [opts.id]              - override the derived note id.
+ * @returns {Object} an `emitted` note ready to persist onto the board corpus.
+ */
+function ingestCapture(payload, opts = {}) {
+  const source = opts.source;
+  if (!source || !isNonEmptyString(source.id) || typeof source.normalize !== "function") {
+    throw new IngestContractError(
+      "ingestCapture requires opts.source to be a valid CaptureSource (id + normalize). " +
+        "Build one with defineSource()."
+    );
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new IngestContractError(
+      `Source "${source.id}" produced a non-object payload. normalize(raw) must return a CapturePayload.`
+    );
+  }
+  if (!isNonEmptyString(payload.title)) {
+    throw new IngestContractError(
+      `Source "${source.id}" produced a capture with no title. CapturePayload.title is required.`
+    );
+  }
+
+  const captureMode = opts.captureMode || DEFAULT_CAPTURE_MODE;
+  if (!CAPTURE_MODES.includes(captureMode)) {
+    throw new IngestContractError(
+      `Unknown captureMode "${captureMode}". Must be one of: ${CAPTURE_MODES.join(", ")}.`
+    );
+  }
+
+  // Timestamp resolution — NO clock read here (determinism). Prefer the
+  // payload's own capturedAt, else the caller-supplied opts.now, else null
+  // (nullable-safe; the board supplies the clock at the UI edge).
+  const capturedAt = isNonEmptyString(payload.capturedAt)
+    ? payload.capturedAt
+    : isNonEmptyString(opts.now)
+    ? opts.now
+    : null;
+
+  const title = payload.title.trim();
+
+  return {
+    id: deriveId(source, payload, opts),
+    title,
+    // ── S2-4 pre-triage entry: the gate keys off this status ──────────────
+    status: PRE_TRIAGE_STATUS, // "emitted"
+    captureMode,
+    // ── source-agnostic marker: just a field, identical across all sources ─
+    source: source.id,
+    // ── PROV-O (spec §5): entity generated by a :CaptureActivity ──────────
+    provenance: buildProvenance({ source, captureMode, capturedAt, payload }),
+    // prov:generatedAtTime — the board maps discoveredDate → prov:generatedAtTime
+    discoveredDate: capturedAt,
+    sourceAgent: source.agentLabel || source.id, // prov:wasAttributedTo (SoftwareAgent)
+    discoveredBy: "Ingest",
+    summary: isNonEmptyString(payload.summary) ? payload.summary : "",
+    // ── facets UNBOUND (nullable) — bound at triage, exactly like emitAmbient ─
+    owner: "",
+    teamVisible: true,
+    convergence: false,
+    refinementNotes: "",
+    decision: "",
+    decisionReason: "",
+    nextAction: "",
+    nextActionDate: "",
+    reactivationTrigger: "",
+    relatedIds: [],
+    tags: Array.isArray(payload.tags) ? payload.tags.filter(isNonEmptyString) : [],
+    domains: [],
+    relations: [],
+  };
+}
+
+/**
+ * ingestFrom — the full DROP-IN path in one call: normalize raw source data
+ * through the adapter, then ingest it. This is what a connector's runtime calls
+ * per captured item. `source.normalize` is the ONLY source-specific code; the
+ * rest of the path is identical for every connector.
+ *
+ * @param {CaptureSource} source
+ * @param {any} raw                - raw source-native data
+ * @param {Object} [opts]          - forwarded to ingestCapture (now/captureMode/id)
+ * @returns {Object} an `emitted` note
+ */
+function ingestFrom(source, raw, opts = {}) {
+  if (!source || typeof source.normalize !== "function") {
+    throw new IngestContractError(
+      "ingestFrom(source, raw): source must be a CaptureSource built with defineSource()."
+    );
+  }
+  const payload = source.normalize(raw);
+  return ingestCapture(payload, { ...opts, source });
+}
+
+// ─── Reference source (proves the socket; NOT a real connector) ──────────────
+// The trivial `manual` source. `raw` is either a plain string or
+// `{ title, summary?, capturedAt?, externalId?, tags? }`. It reads nothing
+// external — it just shows an adapter is ~5 lines and needs no core edit.
+const manualSource = defineSource({
+  id: "manual",
+  label: "Manual capture",
+  agentLabel: "Manual",
+  normalize(raw) {
+    if (typeof raw === "string") return { title: raw };
+    const r = raw || {};
+    return {
+      title: r.title,
+      summary: r.summary,
+      capturedAt: r.capturedAt,
+      externalId: r.externalId,
+      tags: r.tags,
+    };
+  },
+});
+
+exports["CAPTURE_MODES"] = CAPTURE_MODES;
+exports["DEFAULT_CAPTURE_MODE"] = DEFAULT_CAPTURE_MODE;
+exports["manualSource"] = manualSource;
+exports["defineSource"] = defineSource;
+exports["ingestCapture"] = ingestCapture;
+exports["ingestFrom"] = ingestFrom;
+
+};
+
 // S2-6: geometric convergence + ValueScore ranking, via the nullable-safe adapter
 // that bridges the board's stored shape onto the pure-ESM engines. Additive only.
 const { convergentDiscoveryIds, valueScoreMap, defaultState } = __sm_require("board-scoring");
@@ -1686,9 +2278,31 @@ const { autoFacets, confirmTriage } = __sm_require("triage");
 // localStorage (old saved discoveries keep loading), then in-memory. Resolved
 // once at load; the board's async get/set contract is unchanged.
 const { createStorage } = __sm_require("storage-adapter");
+// S3-2 board-UI wiring (deferred follow-up): SURFACE the already-built
+// Clairvoyance-native capture connector in the board — a per-surface opt-in
+// toggle (default OFF), the capture-log view, and a native-only purge. This is
+// surfacing ONLY: capture/privacy/scoring/lifecycle logic is untouched. Native
+// captures stay local, private (teamVisible:false), never auto-public, and fire
+// only for surfaces the user has explicitly opted in.
+const { enableSurface, disableSurface, listNativeCaptures, purgeNativeCaptures, isNativeCapture } = __sm_require("native-capture");
 
 const STORAGE_KEY = "serendipity-discoveries-v1";
 const storage = createStorage();
+
+// S3-2: this board IS one capture "surface". Opt-in is per surface (default OFF)
+// — the user turns native capture on/off for this surface; nothing is captured
+// until they do.
+const NATIVE_SURFACE = "discovery-board";
+// A tiny, SEPARATE key persisting only this surface's opt-in choice so it
+// survives reload (missing/false → OFF). Additive + nullable-safe; it never
+// touches the discovery corpus.
+const NATIVE_OPTIN_KEY = "serendipity-native-optin-v1";
+// Read the distilled surface off a native capture's tags (`surface:<x>`), for
+// display only. Nullable-safe.
+const surfaceOf = (c) =>
+  (c?.tags || [])
+    .find((t) => typeof t === "string" && t.startsWith("surface:"))
+    ?.slice("surface:".length) || "";
 
 const STATUS_META = {
   // S2-4: `emitted` is the pre-`New` ENTRY state. Ambient captures land here with
@@ -1850,6 +2464,11 @@ export default function DiscoveryBoard() {
   const [expanded, setExpanded] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [ambientText, setAmbientText] = useState("");
+  // ── S3-2 board-UI wiring: native-capture connector controls (surfacing) ────
+  const [captureOptIn, setCaptureOptIn] = useState(false);   // default OFF
+  const [nativeCaptures, setNativeCaptures] = useState([]);
+  const [showCaptureLog, setShowCaptureLog] = useState(false);
+  const [purgeArmed, setPurgeArmed] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -1860,6 +2479,19 @@ export default function DiscoveryBoard() {
       } catch { setItems(SAMPLE); }
       setLoading(false);
     })();
+  }, []);
+
+  // S3-2: restore this surface's opt-in choice (default OFF) and load the native
+  // capture log through the connector's own API. Additive; nullable-safe.
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await storage.get(NATIVE_OPTIN_KEY);
+        if (r?.value === "true") { enableSurface(NATIVE_SURFACE); setCaptureOptIn(true); }
+      } catch { /* default OFF */ }
+      await refreshCaptures();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function persist(updated) {
@@ -1875,6 +2507,38 @@ export default function DiscoveryBoard() {
   }
 
   function addItem(disc) { persist([disc, ...items]); setShowAdd(false); }
+
+  // ── S3-2 board-UI wiring: native-capture controls (surface-only) ───────────
+  // The capture log comes straight from the connector's own `listNativeCaptures`
+  // (native-source notes only; other discoveries are never returned).
+  async function refreshCaptures() {
+    try { setNativeCaptures(await listNativeCaptures(storage)); }
+    catch (e) { console.error("native capture list failed", e); setNativeCaptures([]); }
+  }
+
+  // Per-surface OPT-IN toggle → drives the connector's enable/disable registry
+  // (default OFF). The choice is persisted so it survives reload; nothing is
+  // captured on this surface until the user opts in here.
+  async function toggleOptIn() {
+    const next = !captureOptIn;
+    if (next) enableSurface(NATIVE_SURFACE); else disableSurface(NATIVE_SURFACE);
+    setCaptureOptIn(next);
+    try { await storage.set(NATIVE_OPTIN_KEY, next ? "true" : "false"); }
+    catch (e) { console.error("native opt-in save failed", e); }
+  }
+
+  // PURGE — native-only, via the connector. Deletes native captures from the
+  // local store and leaves every other discovery untouched. Two-step confirm
+  // (sandbox-safe: no reliance on window.confirm, which artifact hosts block).
+  async function purgeCaptures() {
+    try {
+      await purgeNativeCaptures(storage);
+      // Re-sync the board with the purged corpus (native notes dropped only).
+      setItems(prev => prev.filter(d => !isNativeCapture(d)));
+      setNativeCaptures([]);
+    } catch (e) { console.error("native purge failed", e); }
+    setPurgeArmed(false);
+  }
 
   // S2-4 ambient capture: the cheap/hot quick-add. Creates an `emitted` item with
   // captureMode = ambient-emitter and NO required facets (just the note/title).
@@ -1972,6 +2636,71 @@ export default function DiscoveryBoard() {
             <div style={css.statLabel}>{s.label}</div>
           </div>
         ))}
+      </div>
+
+      {/* ── S3-2 board-UI wiring: native-capture connector controls ──────────
+          Surfaces the already-built connector: per-surface opt-in (default OFF),
+          the capture-log view, and a native-only purge. Captures are local,
+          private (teamVisible:false), distilled-only, never auto-public. */}
+      <div style={css.nativePanel}>
+        <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
+          <span style={css.nativeTitle}>◈ Native capture</span>
+          <span style={{...css.nativeState, color: captureOptIn ? "#4ade80" : "#7c8598"}}>
+            {captureOptIn ? "ON · this surface" : "OFF · opt-in required"}
+          </span>
+          <button onClick={toggleOptIn}
+            style={{...css.optInBtn,
+              marginLeft:"auto",
+              background: captureOptIn ? "rgba(74,222,128,0.12)" : "rgba(124,133,152,0.14)",
+              borderColor: captureOptIn ? "rgba(74,222,128,0.4)" : "rgba(124,133,152,0.4)",
+              color: captureOptIn ? "#4ade80" : "#a7afc0"}}
+            title="Opt this surface in / out of native capture (default off)">
+            {captureOptIn ? "Disable" : "Enable"}
+          </button>
+        </div>
+        <div style={css.nativeNote}>
+          {captureOptIn
+            ? "Capture is ON for this surface. Captures are distilled (what / where / why only), stored locally and private — never auto-public — and are always viewable and purgeable below."
+            : "Capture is OFF — nothing is captured on this surface until you opt in. Native captures are local, private, and never auto-public."}
+        </div>
+
+        <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"}}>
+          <button
+            onClick={() => { if (!showCaptureLog) refreshCaptures(); setShowCaptureLog(v => !v); }}
+            style={css.logToggle}>
+            {showCaptureLog ? "▾" : "▸"} Capture log ({nativeCaptures.length})
+          </button>
+          {nativeCaptures.length > 0 && (purgeArmed
+            ? <span style={{display:"flex",gap:"0.35rem",marginLeft:"auto",alignItems:"center"}}>
+                <span style={{fontSize:"0.55rem",color:"#ff9f4a",fontFamily:"'DM Mono',monospace"}}>Purge {nativeCaptures.length}? native-only, can't undo</span>
+                <button onClick={purgeCaptures} style={css.purgeConfirmBtn}>Confirm</button>
+                <button onClick={() => setPurgeArmed(false)} style={css.cancelBtn}>Cancel</button>
+              </span>
+            : <button onClick={() => setPurgeArmed(true)}
+                style={{...css.purgeBtn, marginLeft:"auto"}}
+                title="Delete native captures from the local store (other discoveries untouched)">Purge</button>
+          )}
+        </div>
+
+        {showCaptureLog && (
+          <div style={{marginTop:"0.5rem",display:"flex",flexDirection:"column",gap:"0.4rem"}}>
+            {nativeCaptures.length === 0
+              ? <div style={css.nativeEmpty}>no native captures{captureOptIn ? " yet" : ""}</div>
+              : nativeCaptures.map((c,i) => (
+                  <div key={c.id||i} style={css.captureRow}>
+                    <div style={{fontSize:"0.7rem",fontWeight:"600",color:"#e8eaf0",lineHeight:1.35}}>{c.title||"(untitled)"}</div>
+                    {c.summary && <div style={{fontSize:"0.63rem",color:"#b8c0cc",marginTop:"0.2rem",lineHeight:1.45}}>{c.summary}</div>}
+                    <div style={css.captureMeta}>
+                      {surfaceOf(c) && <span>surface: {surfaceOf(c)}</span>}
+                      {surfaceOf(c) && c.discoveredDate && <span style={{color:"#3a3d4a"}}>·</span>}
+                      {c.discoveredDate && <span>{c.discoveredDate}</span>}
+                      <span style={{marginLeft:"auto",color:"#7c8598"}}>private · never public</span>
+                    </div>
+                  </div>
+                ))
+            }
+          </div>
+        )}
       </div>
 
       {/* Status tabs */}
@@ -2562,6 +3291,18 @@ const css = {
   cancelBtn: { background:"transparent", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"5px", color:"#6b7590", padding:"0.25rem 0.6rem", fontSize:"0.62rem", fontFamily:"'DM Mono',monospace", cursor:"pointer" },
   fieldLabel: { display:"block", fontSize:"0.58rem", fontFamily:"'DM Mono',monospace", color:"#6b7590", letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:"0.3rem" },
   submitBtn: { flex:1, padding:"0.55rem", borderRadius:"8px", fontSize:"0.72rem", fontFamily:"'DM Mono',monospace", background:"rgba(167,139,250,0.14)", border:"1px solid rgba(167,139,250,0.35)", color:"#a78bfa", fontWeight:"600", cursor:"pointer" },
+  // ── S3-2 board-UI wiring: native-capture panel ──
+  nativePanel: { background:"#111620", border:"1px solid rgba(0,212,170,0.16)", borderRadius:"10px", padding:"0.7rem 0.8rem", marginBottom:"1.125rem" },
+  nativeTitle: { fontSize:"0.6rem", fontFamily:"'DM Mono',monospace", color:"#00d4aa", letterSpacing:"0.1em", textTransform:"uppercase" },
+  nativeState: { fontSize:"0.55rem", fontFamily:"'DM Mono',monospace", letterSpacing:"0.04em" },
+  optInBtn: { padding:"0.28rem 0.7rem", borderRadius:"7px", fontSize:"0.62rem", fontFamily:"'DM Mono',monospace", cursor:"pointer", border:"1px solid", flexShrink:0 },
+  nativeNote: { fontSize:"0.6rem", color:"#8b93a6", lineHeight:1.5, marginTop:"0.45rem" },
+  logToggle: { background:"transparent", border:"none", color:"#a7afc0", fontSize:"0.62rem", fontFamily:"'DM Mono',monospace", cursor:"pointer", padding:0, letterSpacing:"0.04em" },
+  purgeBtn: { padding:"0.24rem 0.6rem", borderRadius:"6px", fontSize:"0.6rem", fontFamily:"'DM Mono',monospace", background:"rgba(220,38,38,0.1)", border:"1px solid rgba(220,38,38,0.3)", color:"#fca5a5", cursor:"pointer" },
+  purgeConfirmBtn: { padding:"0.24rem 0.6rem", borderRadius:"6px", fontSize:"0.6rem", fontFamily:"'DM Mono',monospace", background:"rgba(220,38,38,0.2)", border:"1px solid rgba(220,38,38,0.5)", color:"#fca5a5", cursor:"pointer" },
+  captureRow: { background:"#0d121b", border:"1px solid rgba(255,255,255,0.06)", borderRadius:"7px", padding:"0.5rem 0.6rem" },
+  captureMeta: { display:"flex", alignItems:"center", gap:"0.4rem", flexWrap:"wrap", fontSize:"0.55rem", fontFamily:"'DM Mono',monospace", color:"#6b7590", marginTop:"0.35rem" },
+  nativeEmpty: { fontSize:"0.62rem", color:"#6b7590", fontFamily:"'DM Mono',monospace", padding:"0.4rem 0", textAlign:"center" },
 };
 
 const fonts = `@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap');

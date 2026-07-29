@@ -19,9 +19,37 @@ import { autoFacets, confirmTriage } from "./lib/triage.mjs";
 // localStorage (old saved discoveries keep loading), then in-memory. Resolved
 // once at load; the board's async get/set contract is unchanged.
 import { createStorage } from "./lib/storage-adapter.mjs";
+// S3-2 board-UI wiring (deferred follow-up): SURFACE the already-built
+// Clairvoyance-native capture connector in the board — a per-surface opt-in
+// toggle (default OFF), the capture-log view, and a native-only purge. This is
+// surfacing ONLY: capture/privacy/scoring/lifecycle logic is untouched. Native
+// captures stay local, private (teamVisible:false), never auto-public, and fire
+// only for surfaces the user has explicitly opted in.
+import {
+  enableSurface,
+  disableSurface,
+  listNativeCaptures,
+  purgeNativeCaptures,
+  isNativeCapture,
+} from "./lib/native-capture.mjs";
 
 const STORAGE_KEY = "serendipity-discoveries-v1";
 const storage = createStorage();
+
+// S3-2: this board IS one capture "surface". Opt-in is per surface (default OFF)
+// — the user turns native capture on/off for this surface; nothing is captured
+// until they do.
+const NATIVE_SURFACE = "discovery-board";
+// A tiny, SEPARATE key persisting only this surface's opt-in choice so it
+// survives reload (missing/false → OFF). Additive + nullable-safe; it never
+// touches the discovery corpus.
+const NATIVE_OPTIN_KEY = "serendipity-native-optin-v1";
+// Read the distilled surface off a native capture's tags (`surface:<x>`), for
+// display only. Nullable-safe.
+const surfaceOf = (c) =>
+  (c?.tags || [])
+    .find((t) => typeof t === "string" && t.startsWith("surface:"))
+    ?.slice("surface:".length) || "";
 
 const STATUS_META = {
   // S2-4: `emitted` is the pre-`New` ENTRY state. Ambient captures land here with
@@ -183,6 +211,11 @@ export default function DiscoveryBoard() {
   const [expanded, setExpanded] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [ambientText, setAmbientText] = useState("");
+  // ── S3-2 board-UI wiring: native-capture connector controls (surfacing) ────
+  const [captureOptIn, setCaptureOptIn] = useState(false);   // default OFF
+  const [nativeCaptures, setNativeCaptures] = useState([]);
+  const [showCaptureLog, setShowCaptureLog] = useState(false);
+  const [purgeArmed, setPurgeArmed] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -193,6 +226,19 @@ export default function DiscoveryBoard() {
       } catch { setItems(SAMPLE); }
       setLoading(false);
     })();
+  }, []);
+
+  // S3-2: restore this surface's opt-in choice (default OFF) and load the native
+  // capture log through the connector's own API. Additive; nullable-safe.
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await storage.get(NATIVE_OPTIN_KEY);
+        if (r?.value === "true") { enableSurface(NATIVE_SURFACE); setCaptureOptIn(true); }
+      } catch { /* default OFF */ }
+      await refreshCaptures();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function persist(updated) {
@@ -208,6 +254,38 @@ export default function DiscoveryBoard() {
   }
 
   function addItem(disc) { persist([disc, ...items]); setShowAdd(false); }
+
+  // ── S3-2 board-UI wiring: native-capture controls (surface-only) ───────────
+  // The capture log comes straight from the connector's own `listNativeCaptures`
+  // (native-source notes only; other discoveries are never returned).
+  async function refreshCaptures() {
+    try { setNativeCaptures(await listNativeCaptures(storage)); }
+    catch (e) { console.error("native capture list failed", e); setNativeCaptures([]); }
+  }
+
+  // Per-surface OPT-IN toggle → drives the connector's enable/disable registry
+  // (default OFF). The choice is persisted so it survives reload; nothing is
+  // captured on this surface until the user opts in here.
+  async function toggleOptIn() {
+    const next = !captureOptIn;
+    if (next) enableSurface(NATIVE_SURFACE); else disableSurface(NATIVE_SURFACE);
+    setCaptureOptIn(next);
+    try { await storage.set(NATIVE_OPTIN_KEY, next ? "true" : "false"); }
+    catch (e) { console.error("native opt-in save failed", e); }
+  }
+
+  // PURGE — native-only, via the connector. Deletes native captures from the
+  // local store and leaves every other discovery untouched. Two-step confirm
+  // (sandbox-safe: no reliance on window.confirm, which artifact hosts block).
+  async function purgeCaptures() {
+    try {
+      await purgeNativeCaptures(storage);
+      // Re-sync the board with the purged corpus (native notes dropped only).
+      setItems(prev => prev.filter(d => !isNativeCapture(d)));
+      setNativeCaptures([]);
+    } catch (e) { console.error("native purge failed", e); }
+    setPurgeArmed(false);
+  }
 
   // S2-4 ambient capture: the cheap/hot quick-add. Creates an `emitted` item with
   // captureMode = ambient-emitter and NO required facets (just the note/title).
@@ -305,6 +383,71 @@ export default function DiscoveryBoard() {
             <div style={css.statLabel}>{s.label}</div>
           </div>
         ))}
+      </div>
+
+      {/* ── S3-2 board-UI wiring: native-capture connector controls ──────────
+          Surfaces the already-built connector: per-surface opt-in (default OFF),
+          the capture-log view, and a native-only purge. Captures are local,
+          private (teamVisible:false), distilled-only, never auto-public. */}
+      <div style={css.nativePanel}>
+        <div style={{display:"flex",alignItems:"center",gap:"0.5rem"}}>
+          <span style={css.nativeTitle}>◈ Native capture</span>
+          <span style={{...css.nativeState, color: captureOptIn ? "#4ade80" : "#7c8598"}}>
+            {captureOptIn ? "ON · this surface" : "OFF · opt-in required"}
+          </span>
+          <button onClick={toggleOptIn}
+            style={{...css.optInBtn,
+              marginLeft:"auto",
+              background: captureOptIn ? "rgba(74,222,128,0.12)" : "rgba(124,133,152,0.14)",
+              borderColor: captureOptIn ? "rgba(74,222,128,0.4)" : "rgba(124,133,152,0.4)",
+              color: captureOptIn ? "#4ade80" : "#a7afc0"}}
+            title="Opt this surface in / out of native capture (default off)">
+            {captureOptIn ? "Disable" : "Enable"}
+          </button>
+        </div>
+        <div style={css.nativeNote}>
+          {captureOptIn
+            ? "Capture is ON for this surface. Captures are distilled (what / where / why only), stored locally and private — never auto-public — and are always viewable and purgeable below."
+            : "Capture is OFF — nothing is captured on this surface until you opt in. Native captures are local, private, and never auto-public."}
+        </div>
+
+        <div style={{display:"flex",alignItems:"center",gap:"0.5rem",marginTop:"0.55rem"}}>
+          <button
+            onClick={() => { if (!showCaptureLog) refreshCaptures(); setShowCaptureLog(v => !v); }}
+            style={css.logToggle}>
+            {showCaptureLog ? "▾" : "▸"} Capture log ({nativeCaptures.length})
+          </button>
+          {nativeCaptures.length > 0 && (purgeArmed
+            ? <span style={{display:"flex",gap:"0.35rem",marginLeft:"auto",alignItems:"center"}}>
+                <span style={{fontSize:"0.55rem",color:"#ff9f4a",fontFamily:"'DM Mono',monospace"}}>Purge {nativeCaptures.length}? native-only, can't undo</span>
+                <button onClick={purgeCaptures} style={css.purgeConfirmBtn}>Confirm</button>
+                <button onClick={() => setPurgeArmed(false)} style={css.cancelBtn}>Cancel</button>
+              </span>
+            : <button onClick={() => setPurgeArmed(true)}
+                style={{...css.purgeBtn, marginLeft:"auto"}}
+                title="Delete native captures from the local store (other discoveries untouched)">Purge</button>
+          )}
+        </div>
+
+        {showCaptureLog && (
+          <div style={{marginTop:"0.5rem",display:"flex",flexDirection:"column",gap:"0.4rem"}}>
+            {nativeCaptures.length === 0
+              ? <div style={css.nativeEmpty}>no native captures{captureOptIn ? " yet" : ""}</div>
+              : nativeCaptures.map((c,i) => (
+                  <div key={c.id||i} style={css.captureRow}>
+                    <div style={{fontSize:"0.7rem",fontWeight:"600",color:"#e8eaf0",lineHeight:1.35}}>{c.title||"(untitled)"}</div>
+                    {c.summary && <div style={{fontSize:"0.63rem",color:"#b8c0cc",marginTop:"0.2rem",lineHeight:1.45}}>{c.summary}</div>}
+                    <div style={css.captureMeta}>
+                      {surfaceOf(c) && <span>surface: {surfaceOf(c)}</span>}
+                      {surfaceOf(c) && c.discoveredDate && <span style={{color:"#3a3d4a"}}>·</span>}
+                      {c.discoveredDate && <span>{c.discoveredDate}</span>}
+                      <span style={{marginLeft:"auto",color:"#7c8598"}}>private · never public</span>
+                    </div>
+                  </div>
+                ))
+            }
+          </div>
+        )}
       </div>
 
       {/* Status tabs */}
@@ -895,6 +1038,18 @@ const css = {
   cancelBtn: { background:"transparent", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"5px", color:"#6b7590", padding:"0.25rem 0.6rem", fontSize:"0.62rem", fontFamily:"'DM Mono',monospace", cursor:"pointer" },
   fieldLabel: { display:"block", fontSize:"0.58rem", fontFamily:"'DM Mono',monospace", color:"#6b7590", letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:"0.3rem" },
   submitBtn: { flex:1, padding:"0.55rem", borderRadius:"8px", fontSize:"0.72rem", fontFamily:"'DM Mono',monospace", background:"rgba(167,139,250,0.14)", border:"1px solid rgba(167,139,250,0.35)", color:"#a78bfa", fontWeight:"600", cursor:"pointer" },
+  // ── S3-2 board-UI wiring: native-capture panel ──
+  nativePanel: { background:"#111620", border:"1px solid rgba(0,212,170,0.16)", borderRadius:"10px", padding:"0.7rem 0.8rem", marginBottom:"1.125rem" },
+  nativeTitle: { fontSize:"0.6rem", fontFamily:"'DM Mono',monospace", color:"#00d4aa", letterSpacing:"0.1em", textTransform:"uppercase" },
+  nativeState: { fontSize:"0.55rem", fontFamily:"'DM Mono',monospace", letterSpacing:"0.04em" },
+  optInBtn: { padding:"0.28rem 0.7rem", borderRadius:"7px", fontSize:"0.62rem", fontFamily:"'DM Mono',monospace", cursor:"pointer", border:"1px solid", flexShrink:0 },
+  nativeNote: { fontSize:"0.6rem", color:"#8b93a6", lineHeight:1.5, marginTop:"0.45rem" },
+  logToggle: { background:"transparent", border:"none", color:"#a7afc0", fontSize:"0.62rem", fontFamily:"'DM Mono',monospace", cursor:"pointer", padding:0, letterSpacing:"0.04em" },
+  purgeBtn: { padding:"0.24rem 0.6rem", borderRadius:"6px", fontSize:"0.6rem", fontFamily:"'DM Mono',monospace", background:"rgba(220,38,38,0.1)", border:"1px solid rgba(220,38,38,0.3)", color:"#fca5a5", cursor:"pointer" },
+  purgeConfirmBtn: { padding:"0.24rem 0.6rem", borderRadius:"6px", fontSize:"0.6rem", fontFamily:"'DM Mono',monospace", background:"rgba(220,38,38,0.2)", border:"1px solid rgba(220,38,38,0.5)", color:"#fca5a5", cursor:"pointer" },
+  captureRow: { background:"#0d121b", border:"1px solid rgba(255,255,255,0.06)", borderRadius:"7px", padding:"0.5rem 0.6rem" },
+  captureMeta: { display:"flex", alignItems:"center", gap:"0.4rem", flexWrap:"wrap", fontSize:"0.55rem", fontFamily:"'DM Mono',monospace", color:"#6b7590", marginTop:"0.35rem" },
+  nativeEmpty: { fontSize:"0.62rem", color:"#6b7590", fontFamily:"'DM Mono',monospace", padding:"0.4rem 0", textAlign:"center" },
 };
 
 const fonts = `@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap');
