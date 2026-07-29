@@ -19,7 +19,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT"
 
 BLOCKLIST_FILE=".boundary-blocklist"
-SCAN_EXT=("*.md" "*.jsx" "*.js" "*.ts" "*.tsx" "*.html" "*.json" "*.txt")
+SCAN_EXT=("*.md" "*.jsx" "*.js" "*.mjs" "*.cjs" "*.ts" "*.tsx" "*.html" "*.json" "*.txt")
 
 # ── Colors (fall back to plain if not a TTY) ──
 if [ -t 1 ]; then
