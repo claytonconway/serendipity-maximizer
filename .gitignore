@@ -1,17 +1,14 @@
-node_modules/
-dist/
-build/
+# Python & OS artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# Environment & local state (runtime sparks live in ~/.gemini/serendipity/ outside git)
 .env
 .env.local
 *.local
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-*.swp
 *.log
-# Runtime discovery data — never commit
-*-registry.md
-serendipity-registry.md
-focus-directives.md
-content-pack/
+.serendipity/

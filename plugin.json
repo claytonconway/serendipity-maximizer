@@ -1,0 +1,12 @@
+{
+  "name": "serendipity-maximizer",
+  "displayName": "Serendipity Maximizer",
+  "version": "2.0.0",
+  "description": "Zero-friction cross-domain serendipity engine: abstracts problems into domain-neutral structural tensions, fans out blinded parallel orthogonal lenses, detects independent convergence, and banks subtle ambient mechanism sparks across your timeline.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "What am I missing here? Abstract the core tension and run a cross-domain serendipity scan",
+    "Flip the main constraint I'm fighting right now into a mechanism or feature",
+    "Collide my current problem against my banked spark log for unexpected bridges"
+  ]
+}

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <defs>
+    <linearGradient id="frameGrad" x1="28" y1="28" x2="228" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#A78BFA"/>
+      <stop offset="50%" stop-color="#2DD4BF"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+    <linearGradient id="arcA" x1="52" y1="196" x2="196" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#2DD4BF"/>
+    </linearGradient>
+    <linearGradient id="arcB" x1="56" y1="68" x2="200" y2="192" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#C084FC"/>
+      <stop offset="100%" stop-color="#F472B6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Outer rounded badge frame with >10% margin (28..228) -->
+  <rect x="28" y="28" width="200" height="200" rx="42" stroke="url(#frameGrad)" stroke-width="8" fill="#0B1120" fill-opacity="0.92"/>
+
+  <!-- Mid-distance serendipity band ring -->
+  <circle cx="128" cy="128" r="64" stroke="#2DD4BF" stroke-opacity="0.28" stroke-width="14"/>
+  <circle cx="128" cy="128" r="64" stroke="#2DD4BF" stroke-opacity="0.65" stroke-width="2" stroke-dasharray="6 6"/>
+
+  <!-- Two orthogonal domain trajectories colliding at center -->
+  <path d="M 56 188 C 86 182, 108 158, 128 128 C 148 98, 172 74, 200 68" stroke="url(#arcA)" stroke-width="5.5" stroke-linecap="round"/>
+  <path d="M 60 72 C 92 78, 110 100, 128 128 C 146 156, 166 178, 198 184" stroke="url(#arcB)" stroke-width="5.5" stroke-linecap="round"/>
+
+  <!-- Lens origin nodes -->
+  <circle cx="56" cy="188" r="6" fill="#38BDF8"/>
+  <circle cx="60" cy="72" r="6" fill="#C084FC"/>
+  <circle cx="200" cy="68" r="5" fill="#2DD4BF" fill-opacity="0.8"/>
+  <circle cx="198" cy="184" r="5" fill="#F472B6" fill-opacity="0.8"/>
+
+  <!-- Central convergence 4-point spark -->
+  <path d="M 128 96 L 135 121 L 160 128 L 135 135 L 128 160 L 121 135 L 96 128 L 121 121 Z" fill="#FBBF24" stroke="#FFFFFF" stroke-width="2.5" stroke-linejoin="round"/>
+</svg>
